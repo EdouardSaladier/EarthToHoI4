@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PIL import Image
-from flask import Flask, jsonify, request, send_file, Response
+from flask import Flask, jsonify, request, send_file, Response, got_request_exception
 
 import cities
 import density
@@ -41,6 +41,15 @@ import strategic
 import terrain
 
 app = Flask(__name__)
+import run_params  # noqa: E402  (generation parameters: saved with every run, Save / Load in the UI)
+
+
+def _record_request_error(sender, exception, **extra):
+    """Every unhandled server error goes into the parameters files (recent_errors)."""
+    run_params.record_error(request.path if request else "?", exception)
+
+
+got_request_exception.connect(_record_request_error, app)
 
 INDEX_HTML = (core.BASE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
 
@@ -1893,36 +1902,78 @@ def api_hoi4_export():
     game = hoi4mod.find_game_dir()
     if game is None:
         return jsonify({"error": "Hearts of Iron IV wasn't found: choose its folder (HOI4 mod tab)"}), 400
+    mod_dir = hoi4mod.mod_dir()
+    if not mod_dir.is_dir():
+        return jsonify({"error": f"The mod folder doesn't exist: {mod_dir} (choose it in the HOI4 mod tab)"}), 400
     with _export_lock:
         if _export_job.get("state") == "running":
             return jsonify({"error": "An export is already running"}), 409
         _export_job.clear()
         _export_job.update(state="running", step="Collecting every tab's results", started=time.time())
     query = request.query_string.decode()
-    mod_dir = hoi4mod.mod_dir()
-    if not mod_dir.is_dir():
-        return jsonify({"error": f"The mod folder doesn't exist: {mod_dir} (choose it in the HOI4 mod tab)"}), 400
     out = mod_dir / hoi4mod.ascii_name(settings["name"])
+    # the run's parameters, saved before it starts (a crash leaves them behind)
+    body = request.get_json(silent=True) or {}
+    params = run_params.collect(query, ui=body.get("ui"), kind="export")
+    params_paths = [run_params.save_run(params, settings["name"])]
+    _export_job["params_file"] = str(params_paths[0])
 
     def run():
+        paths = params_paths + [out / "earthtohoi4_params.json"]
         try:
             with app.test_request_context("/?" + query):
                 src = _hoi4_sources()
             rep = hoi4mod.build_mod(src, settings, out, game,
                                     progress=lambda msg: _export_job.update(step=msg))
             hoi4mod.install_descriptor(out, mod_dir)
+            run_params.finish(params, paths, "done", seconds=round(time.time() - _export_job["started"], 1),
+                              problems=rep.get("problems"))
             _export_job.update(state="done", step="Done", path=str(out), report={
                 k: rep.get(k) for k in ("states", "impassable_states", "provinces", "strategic_regions",
-                                        "victory_points", "railways", "straits", "problems", "warnings")},
+                                        "victory_points", "railways", "straits", "problems", "warnings",
+                                        "map_scale", "daynight", "lighting")},
                 countries=len(rep.get("countries", [])), seconds=round(time.time() - _export_job["started"], 1))
         except _Preparing:
             _export_job.update(state="error", error="The land cover is still being prepared (Terrain tab)")
+            run_params.finish(params, params_paths, "not ready", error=_export_job["error"])
         except Exception as e:  # report anything to the page
             import traceback
             traceback.print_exc()
+            run_params.record_error("export", e)
             _export_job.update(state="error", error=f"{type(e).__name__}: {e}")
+            run_params.finish(params, paths if out.is_dir() else params_paths, "error",
+                              error=f"{type(e).__name__}: {e}", tb=traceback.format_exc(),
+                              step=_export_job.get("step"))
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"started": True, "path": str(out)})
+
+
+@app.post("/api/params/export")
+def api_params_export():
+    """The current generation parameters as a file: body {query: the full
+    request (every tab's settings), ui: the page's saved state}."""
+    body = request.get_json(silent=True) or {}
+    params = run_params.collect(str(body.get("query") or ""), ui=body.get("ui"), kind="snapshot")
+    buf = io.BytesIO(json.dumps(params, indent=1, ensure_ascii=False, default=str).encode("utf-8"))
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    return send_file(buf, mimetype="application/json", as_attachment=True,
+                     download_name=f"earthtohoi4_params_{stamp}.json")
+
+
+@app.post("/api/params/import")
+def api_params_import():
+    """A parameters file (JSON body): its Land/Sea settings and colours become
+    the active ones; returns its page state and request for the page to restore."""
+    params = request.get_json(silent=True)
+    try:
+        notes = run_params.check(params)
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": str(e)}), 400
+    run_params.apply_settings(params)
+    s = params.get("settings") or {}
+    return jsonify({"ui": params.get("ui") or {}, "query": params.get("query") or "", "notes": notes,
+                    "game_dir": s.get("game_dir"), "mod_dir": s.get("mod_dir"),
+                    "result": params.get("result")})
 
 
 if __name__ == "__main__":

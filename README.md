@@ -58,6 +58,19 @@ left to right. The HOI4 mod tab finds the game and your mod folder by itself
 A command-line renderer for country maps also exists:
 `python render_map.py FRA DEU ITA --projection mercator --margin 10`.
 
+## Reporting a problem
+
+Every export saves its **generation parameters** — every setting of every tab,
+plus the tool's version, Python, OS, game version and datasets — as
+`earthtohoi4_params.json` in the exported mod's folder, and in the tool's
+`runs/` folder (the last 30 runs; a run that failed records its error and
+traceback there). The **Save parameters** button (top right) downloads the
+current settings at any time; **Load parameters** restores them.
+
+If the tool or an exported mod crashes, open an issue and attach that file:
+it lets the run be reproduced exactly
+(`python run_params.py replay <file> [--export "Mod name"]`).
+
 ## Data sources
 
 The tool downloads these datasets itself (Download tab). They keep their own

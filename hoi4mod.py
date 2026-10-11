@@ -943,7 +943,7 @@ def clean_base_game(out, van, our_tags):
         if rel.startswith("events/") and r:
             r = [e for e in r if not (e[0] in EVENT_KEYS and isinstance(e[2], list) and _event_broken(e[2]))]
         if r is None:
-            _write(out / rel, "# Map Tool: the base game's country-specific content, neutralised\n")
+            _write(out / rel, "# EarthToHoI4: the base game's country-specific content, neutralised\n")
             stats["country_files_emptied"] += 1
         elif r is not False:
             _write(out / rel, pdx.dump(r))
@@ -1413,7 +1413,11 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
     progress("Neutralising the base game's country content")
     write_neutralised(out, van, report, our_tags=[c["tag"] for c in countries.values()])
     _write(out / "tutorial/tutorial.txt", "tutorial = {}\n")  # vanilla's links its own states
+    write_lighting(out, src["view"], H, report)
+    write_daynight(out, van, src["view"], W, H, report)
+    write_map_scale(out, van, src["view"], W, H, report)
     write_descriptor(out, settings, van, src)
+    write_about(out, src, settings, countries, report)
     report["countries"] = [{"gadm": g, "tag": c["tag"], "vanilla": c["vanilla"], "name": c["name"],
                             "states": len(c["states"]), "capital": c["capital"]["id"], "flag": c.get("flag")}
                            for g, c in countries.items()]
@@ -1423,6 +1427,75 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
     report["problems"] = problems
     (out / "map_tool_export.json").write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
     return report
+
+
+# ------------------------------------------------------------------ about
+TOOL_URL = "https://github.com/EdouardSaladier/EarthToHoI4"
+# (name, used for, link, licence) -- the datasets every export is made from
+DATA_CREDITS = (
+    ("GADM 3.6", "country and administrative borders, states, names", "https://gadm.org",
+     "free for academic and other non-commercial use; redistribution of the data and commercial use not allowed"),
+    ("NASA Blue Marble: topography, bathymetry, imagery", "heightmap, normal map, sea depth, colour map",
+     "https://visibleearth.nasa.gov/collection/1484/blue-marble", "NASA imagery, free to use with credit"),
+    ("HydroSHEDS: HydroRIVERS and HydroLAKES", "rivers, lakes", "https://www.hydrosheds.org", "CC BY 4.0"),
+    ("Copernicus Global Land Cover (CGLS-LC100)", "terrain, forests", "https://land.copernicus.eu/global/products/lc",
+     "free and open, with attribution (Copernicus Service information)"),
+    ("GeoNames", "cities, victory points, city names", "https://www.geonames.org", "CC BY 4.0"),
+    ("Marine Regions: World EEZ v12", "maritime zones, sea strategic regions", "https://www.marineregions.org",
+     "CC BY 4.0"),
+    ("JRC Global Human Settlement Layer (GHS-POP, GHS-DUC)", "population, manpower, density",
+     "https://ghsl.jrc.ec.europa.eu", "CC BY 4.0"),
+    ("ERA5 climate normals (World Bank Climate Change Knowledge Portal)", "weather of strategic regions",
+     "https://climateknowledgeportal.worldbank.org", "CC BY 4.0"),
+)
+
+
+def write_about(out, src, settings, countries, report):
+    """ABOUT_EarthToHoI4.txt: the mod was made by the tool, from which data
+    (links and licences) -- user request."""
+    import datetime
+    import run_params
+    view = src.get("view") or {}
+    cv = run_params.code_version()
+    report["tool_commit"] = cv.get("git_commit") or cv["code_hash"]
+    lines = [
+        f"{settings['name']}",
+        "=" * max(len(settings["name"]), 10),
+        "",
+        "This Hearts of Iron IV mod was generated automatically by EarthToHoI4,",
+        "a tool that builds HOI4 map mods from real-world geodata:",
+        f"    {TOOL_URL}",
+        "",
+        f"Generated on {datetime.date.today().isoformat()}"
+        + f" (tool version {report['tool_commit'][:10]}).",
+        f"Map: {str(view.get('projection', '?')).capitalize()} projection, {view.get('width', '?')} x {view.get('height', '?')} px, "
+        f"{len(countries)} countries.",
+        "",
+        "Data sources",
+        "------------",
+    ]
+    credits = list(DATA_CREDITS)
+    if any(c.get("flag") for c in countries.values()):
+        credits.append(("Country flags from flagcdn.com", "country flags", "https://flagcdn.com", "free to use"))
+    for name, use, url, lic in credits:
+        lines += [f"- {name}", f"    used for: {use}", f"    {url}", f"    licence: {lic}"]
+    if report.get("fonts"):
+        lines += ["- Fonts from the mod Magna Europa: Reloaded (special characters in names)",
+                  "    https://steamcommunity.com/sharedfiles/filedetails/?id=" + FONT_MOD_WORKSHOP_ID]
+    lines += [
+        "",
+        "The data keep their own licences, which apply to this mod too -- notably",
+        "GADM's: free for non-commercial use only.",
+        "",
+        "Hearts of Iron IV is a trademark of Paradox Interactive. This mod and the",
+        "tool are not affiliated with or endorsed by Paradox Interactive.",
+        "",
+        "Reporting a problem: earthtohoi4_params.json in this folder holds every",
+        "setting used to generate this mod. Attach it to an issue on the tool's",
+        "page so the generation can be reproduced.",
+        "",
+    ]
+    _write(out / "ABOUT_EarthToHoI4.txt", "\n".join(lines))
 
 
 # ------------------------------------------------------------------ map
@@ -2470,7 +2543,7 @@ def write_countries(out, countries, van, settings, report):
     # colours: ours + the dynamic countries' (no entry for an undefined tag)
     dyn = set(van.dynamic_tags)
     base = [(k, o, v) for k, o, v in pdx.parse(base_colors) if k in dyn]
-    _write(out / "common/countries/colors.txt", (pdx.dump(base) if base else "") + "\n# Map Tool countries\n"
+    _write(out / "common/countries/colors.txt", (pdx.dump(base) if base else "") + "\n# EarthToHoI4 countries\n"
            + "\n".join(colors) + "\n")
     write_bookmark(out, countries)
     write_names(out, countries, van)
@@ -2591,7 +2664,7 @@ def write_localisation(out, states, vps, regions, countries, van):
                 for suf in ("", "_DEF", "_ADJ"):
                     cl.append(f' {tag}{k}{suf}:0 "{loc_text(c["name"])}"')
         cl += [' MAP_TOOL_BOOKMARK_NAME:0 "Map Tool World"',
-               ' MAP_TOOL_BOOKMARK_DESC:0 "A map made with the Map Tool. Country content comes later."',
+               ' MAP_TOOL_BOOKMARK_DESC:0 "A map made with EarthToHoI4. Country content comes later."',
                ' MAP_TOOL_COUNTRY_DESC:0 ""', ' MAP_TOOL_OTHER_DESC:0 ""']
         _write(d / f"map_tool_countries_l_{lang}.yml", hdr + "\n".join(cl) + "\n", bom=True)
 
@@ -2644,6 +2717,179 @@ def write_fonts(out, van, report):
             glyphs = ids if glyphs is None else glyphs & ids
     _GLYPHS[0] = glyphs
     report["fonts"] = {"from": str(src), "files": len(files)}
+
+
+# ------------------------------------------------------------------ lighting
+# The game lights the terrain from a virtual sun at map row SUN_LATITUDE
+# (from the bottom), SUN_HEIGHT above the map: the light's angle falls with
+# the distance from that row. The values are vanilla's map's (sun over
+# ~13.6 N, 600 px high, ~12.6 px per degree there): on a map framed
+# elsewhere the sun sat at the wrong place and the far end was lit at a
+# grazing angle (user: the Sahara dark on an Africa map, 2,000+ px from it).
+# Placed over the same latitude and scaled by this map's px per degree,
+# every latitude gets vanilla's sun angle.
+VANILLA_SUN = {"SUN_LATITUDE": 848.0, "SECOND_SUN_LATITUDE": 100.0, "SECOND_MOON_LATITUDE": 100.0,
+               "SUN_HEIGHT": 600.0, "MOON_HEIGHT": 600.0, "SUN_HEIGHT_WATER": 5000.0, "MOON_HEIGHT_WATER": 550.0}
+
+
+def _vanilla_row_lat(row):
+    """Latitude at a vanilla map row (top-down), from the georeference fit."""
+    lt = np.linspace(-80, 85, 33001)
+    rt = np.polyval(GEO_Y, lt)
+    o = np.argsort(rt)
+    return float(np.interp(row, rt[o], lt[o]))
+
+
+def map_lighting(view, H):
+    """({define: value} placing the virtual sun / moon like vanilla's, info)."""
+    import core
+    func = core.PROJECTIONS[view["projection"]]["func"]
+
+    def row_of(lat):  # pixel row (top-down) of a latitude on this map
+        _x, y = func(np.array([0.0]), np.array([float(lat)]))
+        return float(view["height"] - (y[0] - view["win_ymin"]) * view["scale"] - 0.5)
+    sun_lat = _vanilla_row_lat(VANILLA_H - 1 - VANILLA_SUN["SUN_LATITUDE"])
+    van_ppd = abs(np.polyval(GEO_Y, sun_lat + 0.5) - np.polyval(GEO_Y, sun_lat - 0.5))
+    our_ppd = abs(row_of(sun_lat + 0.5) - row_of(sun_lat - 0.5))
+    k = our_ppd / max(van_ppd, 1e-9)
+    sun_z = H - 1 - row_of(sun_lat)
+    vals = {"SUN_LATITUDE": sun_z}
+    for key in ("SECOND_SUN_LATITUDE", "SECOND_MOON_LATITUDE"):  # same offset from the sun, scaled
+        vals[key] = sun_z + (VANILLA_SUN[key] - VANILLA_SUN["SUN_LATITUDE"]) * k
+    for key in ("SUN_HEIGHT", "MOON_HEIGHT", "SUN_HEIGHT_WATER", "MOON_HEIGHT_WATER"):
+        vals[key] = VANILLA_SUN[key] * k
+    return vals, {"sun_latitude_deg": round(sun_lat, 2), "scale": round(k, 3)}
+
+
+def write_lighting(out, view, H, report):
+    vals, info = map_lighting(view, H)
+    lines = ["-- The map lighting placed for this map's frame (EarthToHoI4: hoi4mod.map_lighting)"]
+    lines += [f"NDefines.NGraphics.{k} = {v:.1f}" for k, v in vals.items()]
+    _write(out / "common/defines/zz_map_tool_lighting.lua", "\n".join(lines) + "\n")
+    report["lighting"] = dict(info, **{k: round(v, 1) for k, v in vals.items()})
+
+
+def frame_geo(view, W, H):
+    """This map's geography for the shaders: latitude of the bottom / top rows
+    and longitude of the left / right columns (centre column / row), and
+    row_of(lat) (top-down)."""
+    import core
+    func = core.PROJECTIONS[view["projection"]]["func"]
+
+    def row_of(lat):
+        _x, y = func(np.array([0.0]), np.array([float(lat)]))
+        return float(view["height"] - (y[0] - view["win_ymin"]) * view["scale"] - 0.5)
+    lon, lat = px_lonlat(view, [W / 2, W / 2], [H - 1, 0])
+    lon2, _lat2 = px_lonlat(view, [0, W - 1], [H / 2, H / 2])
+    left, right = float(lon2[0]), float(lon2[1])
+    while right <= left:
+        right += 360.0
+    return {"lat_bottom": float(lat[0]), "lat_top": float(lat[1]), "lon_left": left, "lon_right": right,
+            "row_of": row_of}
+
+
+# Day / night and seasons. The shaders turn map positions into a globe with
+# vanilla's constants (standardfuncsgfx.fxh: Greenwich at x = 2793, the map
+# = 360 degrees of longitude, rows = 59 S .. 77 N; constants.fxh: trees take
+# season colours above half the map's height): on another frame the night
+# band crossed the whole map in half a day and the latitudes were wrong. The
+# export ships patched copies of the player's own two files.
+def write_daynight(out, van, view, W, H, report):
+    g = frame_geo(view, W, H)
+    deg_px = (g["lon_right"] - g["lon_left"]) / max(W - 1, 1)  # degrees of longitude per pixel
+    full_turn = 360.0 / max(deg_px, 1e-9)            # px for 360 degrees of longitude
+    gmt = -g["lon_left"] / max(deg_px, 1e-9) + 0.5   # x of longitude 0 (may lie off the map)
+    south = (g["lat_bottom"] + 90.0) / 180.0          # the shader: latitude = 180 * y - 90
+    north = (g["lat_top"] + 90.0) / 180.0
+    # trees' season colour: from vanilla's latitude at half its height, full at 0.9
+    lat_a = _vanilla_row_lat(VANILLA_H / 2.0)
+    lat_b = _vanilla_row_lat(VANILLA_H * 0.1)
+    za = 1.0 - (g["row_of"](lat_a) + 0.5) / H
+    zb = 1.0 - (g["row_of"](lat_b) + 0.5) / H
+    tree_min, tree_tweak = za, 1.0 / max(zb - za, 1e-3)
+    fx = van.game / "gfx" / "FX"
+    done = []
+    sf = fx / "standardfuncsgfx.fxh"
+    if sf.exists():
+        t = sf.read_text(encoding="utf-8-sig", errors="replace")
+        rep = [(r"static const float GMT_OFFSET = [-0-9.]+f;",
+                f"static const float GMT_OFFSET = {gmt:.1f}f; static const float FULL_TURN_X = {full_turn:.1f}f;"),
+               (r"static const float SOUTH_POLE_OFFSET = [-0-9.]+f;", f"static const float SOUTH_POLE_OFFSET = {south:.4f}f;"),
+               (r"static const float NORTH_POLE_OFFSET = [-0-9.]+f;", f"static const float NORTH_POLE_OFFSET = {north:.4f}f;"),
+               (r"\( vWorldXZ\.x - GMT_OFFSET \) / MAP_SIZE_X", "( vWorldXZ.x - GMT_OFFSET ) / FULL_TURN_X")]
+        ok = True
+        for pat, new in rep:
+            t, k = re.subn(pat, new, t, count=1)
+            ok &= k == 1
+        if ok:  # only a file every edit applied to (another game version: vanilla's stays)
+            _write(out / "gfx/FX/standardfuncsgfx.fxh", t)
+            done.append("standardfuncsgfx.fxh")
+    cf = fx / "constants.fxh"
+    if cf.exists():
+        t = cf.read_text(encoding="utf-8-sig", errors="replace")
+        t, k1 = re.subn(r"(TREE_SEASON_MIN\s*=\s*)[-0-9.]+f", lambda m: f"{m.group(1)}{tree_min:.4f}f", t, count=1)
+        t, k2 = re.subn(r"(TREE_SEASON_FADE_TWEAK\s*=\s*)[-0-9.]+f", lambda m: f"{m.group(1)}{tree_tweak:.4f}f", t, count=1)
+        if k1 and k2:
+            _write(out / "gfx/FX/constants.fxh", t)
+            done.append("constants.fxh")
+    lines = ["-- Day / night placed for this map's frame (EarthToHoI4: hoi4mod.write_daynight)",
+             f"NDefines.NGraphics.GMT_OFFSET = {gmt:.1f}",
+             f"NDefines.NGraphics.SOUTH_POLE_OFFSET = {south:.4f}",
+             f"NDefines.NGraphics.NORTH_POLE_OFFSET = {north:.4f}"]
+    _write(out / "common/defines/zz_map_tool_daynight.lua", "\n".join(lines) + "\n")
+    report["daynight"] = {"shaders": done, "gmt_offset": round(gmt, 1), "full_turn_px": round(full_turn, 1),
+                          "south_pole_offset": round(south, 4), "north_pole_offset": round(north, 4),
+                          "tree_season_min": round(tree_min, 4), "tree_season_fade": round(tree_tweak, 3)}
+
+
+# Distances the base game measures in map pixels (00_defines.lua), for a
+# 7.114 km / px map: scaled so they cover the same ground here; the map's
+# km per pixel set too (aircraft ranges, movement ...). value x k, or / k
+# where the pixels divide; area (pixels^2) x k^2.
+VANILLA_KM_PER_PX = 7.114
+PIXEL_DEFINES = {"MAP_SCALE_PIXEL_TO_KM": "km", "INFLUENCE_DISTANCE_DIVISOR": "x", "RADAR_RANGE_BASE": "x",
+                 "RADAR_RANGE_MIN": "x", "RADAR_RANGE_MAX": "x", "AIR_REGION_SUPERIORITY_PIXEL_SCALE": "/area",
+                 "INTERCEPTION_DISTANCE_SCALE": "x", "RAILWAY_GUN_POSSIBLE_RANGES": "x",
+                 "INVASION_TARGET_DISTANCE_DENOMINATOR": "x", "DANGEROUS_DISTANCE_TO_CAPITAL": "x"}
+
+
+def write_map_scale(out, van, view, W, H, report):
+    import core
+    kmpx = float(core._km_per_px({"view": view}))
+    k = VANILLA_KM_PER_PX / max(kmpx, 1e-6)
+    src = van.game / "common" / "defines" / "00_defines.lua"
+    if not src.exists():
+        return
+    text = src.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    ns, found = None, {}
+    for line in text:
+        m = re.match(r"^\s*(N\w+)\s*=\s*\{", line)
+        if m:
+            ns = m.group(1)
+            continue
+        m = re.match(r"^\s*([A-Z0-9_]+)\s*=\s*(\{[^}]*\}|[-0-9.]+)", line)
+        if m and m.group(1) in PIXEL_DEFINES and ns and m.group(1) not in found:
+            found[m.group(1)] = (ns, m.group(2))
+    lines = [f"-- Map scale: {kmpx:.3f} km per pixel ({k:.3f} x vanilla's pixels per km) "
+             "(EarthToHoI4: hoi4mod.write_map_scale)"]
+    vals = {}
+    for key, (ns, raw) in found.items():
+        kind = PIXEL_DEFINES[key]
+
+        def conv(v):
+            v = float(v)
+            return kmpx if kind == "km" else v / (k * k) if kind == "/area" else v * k
+        if raw.startswith("{"):
+            nums = [conv(x) for x in re.findall(r"[-0-9.]+", raw)]
+            val = "{ " + ", ".join(f"{x:.1f}" for x in nums) + " }"
+        else:
+            x = conv(raw)
+            val = f"{x:.6g}"
+        vals[key] = val
+        lines.append(f"NDefines.{ns}.{key} = {val}")
+    _write(out / "common/defines/zz_map_tool_scale.lua", "\n".join(lines) + "\n")
+    report["map_scale"] = {"km_per_px": round(kmpx, 3), "factor": round(k, 3), "defines": vals,
+                           "missing": sorted(set(PIXEL_DEFINES) - set(found))}
 
 
 # ------------------------------------------------------------------ descriptor

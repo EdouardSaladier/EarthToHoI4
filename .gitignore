@@ -14,6 +14,7 @@ color_presets/*.json
 
 # Runtime
 flask.log
+flask_err.log
 __pycache__/
 *.pyc
 
@@ -24,3 +25,6 @@ _dev/
 CLAUDE.md
 /cache
 /historical_maps
+
+# Parameters of past runs (run_params.py)
+runs/

@@ -100,6 +100,24 @@ fitted on vanilla; naval terrain from bathymetry, islands and coast distance.
 - `adjacencies.csv`: a sea crossing's "through" province must touch at least
   one of the two shores.
 - Ambient objects: only the generic ones (wind, water, frame, logo).
+- Map scale and day/night, computed per export from the map's frame:
+  `zz_map_tool_scale.lua` sets `MAP_SCALE_PIXEL_TO_KM` to the map's km per
+  pixel (at the frame's centre) and scales every define the game measures in
+  pixels (radar ranges, railway gun ranges, interception distance, influence,
+  AI invasion distances: x 7.114 / km-per-px; the air-superiority area scale
+  / that squared). `zz_map_tool_daynight.lua` + patched copies of the
+  player's own `gfx/FX/standardfuncsgfx.fxh` (Greenwich's x, the px of a
+  full 360 degrees of longitude instead of the map width, the pole offsets =
+  the frame's top / bottom latitudes) and `constants.fxh` (the tree-season
+  band at vanilla's latitudes). A shader whose expected lines aren't found
+  (another game version) is left out rather than written half-patched.
+- Lighting: the game lights the terrain from a virtual sun at map row
+  `SUN_LATITUDE` (from the bottom), `SUN_HEIGHT` above the map — vanilla's
+  values put it over ~12.4°N, 600 px high. On another frame the far end of the
+  map was lit at a grazing angle (the Sahara dark on an Africa map), so the
+  export writes `common/defines/zz_map_tool_lighting.lua` placing the sun /
+  moon over the same latitude, heights scaled by the map's px per degree
+  (`map_lighting`). Lua comments are `--`: a `#` broke every define (crash).
 - Neutralising: `replace_path` on the content folders, their generic files
   copied back cleaned; every other base-game script file either reduced to
   the definitions generic files use (country-specific files) or cleaned by
@@ -107,8 +125,28 @@ fitted on vanilla; naval terrain from bathymetry, islands and coast distance.
   effects removed, gated definitions dropped). Exclusion lists that empty out
   lose only the list — dropping the generic AI division templates crashed the
   game mid-game.
+- `ABOUT_EarthToHoI4.txt` in every mod: made by the tool (link, date, code
+  version, frame), the datasets used with links and licences (`DATA_CREDITS`),
+  flags / fonts credits, the Paradox disclaimer, the parameters file.
 - `check_mod` re-checks the written files; every 8-bit BMP is re-read and
   compared (Pillow once wrote a 255-colour palette short).
+
+## Generation parameters (`run_params.py`)
+
+Everything a run depends on, in one JSON file: the full request (the view +
+every tab's settings + the mod's, as the export's query string), the
+server-side settings (Land/Sea, colours, chosen game / mod folders), the page's
+localStorage (`mapTool.*`, including the Countries view, `mapTool.view`), the
+code version (content hash + git commit / local changes), Python, packages,
+OS, game version, dataset files (name, size, date), the last server errors
+(tracebacks, recorded through Flask's `got_request_exception` and the export
+thread) and the run's result. Written by every export before it starts
+(`runs/`, last 30) and into the mod folder, then completed with the result
+(error + traceback + the step it failed at). `POST /api/params/export` /
+`POST /api/params/import` back the header's Save / Load buttons (loading
+applies the server settings, replaces the page's `mapTool.*` keys and
+reloads). `python run_params.py replay <file> [--export NAME]` reruns a file
+with its settings, restoring the local ones afterwards.
 
 ## Testing
 

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Map Tool</title>
+<title>EarthToHoI4</title>
 <style>
   :root {
     --bg: #14161a;
@@ -511,12 +511,15 @@
 <body>
 <header>
   <div>
-    <h1>Map Tool</h1>
-    <p>Flat-color renders of one or more countries from the GADM level-0 shapefile, fixed-resolution output, choice of projection.</p>
+    <h1>EarthToHoI4</h1>
+    <p>Hearts of Iron IV map mods from real-world geodata (GADM borders, HydroSHEDS rivers, NASA relief, Copernicus land cover, GeoNames cities, ...).</p>
   </div>
   <div class="header-btns">
-    <button id="refreshApp" class="refresh-btn" title="Restart the Map Tool with its current code and reload this page">Refresh</button>
-    <button id="closeApp" class="close-btn" title="Stop the Map Tool server">Close</button>
+    <button id="saveParams" class="refresh-btn" title="Download every setting of every tab (and what this tool runs on) as a file: to share a run, or to report a crash">Save parameters</button>
+    <button id="loadParams" class="refresh-btn" title="Restore every setting from a parameters file">Load parameters</button>
+    <input type="file" id="loadParamsFile" accept=".json,application/json" style="display:none">
+    <button id="refreshApp" class="refresh-btn" title="Restart EarthToHoI4 with its current code and reload this page">Refresh</button>
+    <button id="closeApp" class="close-btn" title="Stop the EarthToHoI4 server">Close</button>
   </div>
 </header>
 
@@ -2474,7 +2477,7 @@ loadDownloads();
 
 // ---------- close app ----------
 document.getElementById('closeApp').addEventListener('click', async () => {
-  if (!confirm('Stop the Map Tool server? You will need to relaunch it to use this page again.')) return;
+  if (!confirm('Stop the EarthToHoI4 server? You will need to relaunch it to use this page again.')) return;
   try {
     await fetch('/api/shutdown', { method: 'POST' });
   } catch (err) {
@@ -2482,7 +2485,7 @@ document.getElementById('closeApp').addEventListener('click', async () => {
   }
   const overlay = document.createElement('div');
   overlay.className = 'shutdown-overlay';
-  overlay.innerHTML = '<div>Map Tool server stopped.<br>You can close this tab.</div>';
+  overlay.innerHTML = '<div>EarthToHoI4 server stopped.<br>You can close this tab.</div>';
   document.body.appendChild(overlay);
 });
 
@@ -2730,8 +2733,6 @@ async function init() {
   ]);
   allCountries = countries;
   ['PRT', 'AZE', 'FIN', 'TUN'].forEach(t => selectedTags.add(t));
-  renderCountryList('');
-  renderChips();
 
   projections.forEach(p => {
     const opt = document.createElement('option');
@@ -2748,6 +2749,11 @@ async function init() {
     opt.textContent = `${w} × ${h} (${orient})`;
     outputSizeSelect.appendChild(opt);
   });
+  // the last view (or the one a parameters file brought), else the default
+  const saved = restoreView();
+  renderCountryList('');
+  renderChips();
+  if (saved && saved.center !== undefined) document.getElementById('centerOn').value = saved.center;
 }
 
 countryFilter.addEventListener('input', () => renderCountryList(countryFilter.value));
@@ -3338,8 +3344,51 @@ function currentViewParams() {
 // shows this map instead of the plain render. Set by rvRender.
 let genFitted = null; // {key, params, fit}
 
+// The Countries tab's view, remembered in localStorage at every render
+// (mapTool.view) and restored at start -- also how a parameters file brings
+// the selection back.
+const VIEW_STORE = 'mapTool.view';
+
+function saveView() {
+  const view = currentViewParams();
+  if (!view) return;
+  const inc = {};
+  for (const [id, v] of includedSubs) inc[id] = v;
+  try {
+    localStorage.setItem(VIEW_STORE, JSON.stringify({ ...view, excluded_tags: [...excludedTags],
+      excluded_subs: [...excludedSubs], included_subs: inc }));
+  } catch (e) { /* storage unavailable */ }
+}
+
+function restoreView() {
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(VIEW_STORE) || 'null'); } catch (e) { v = null; }
+  if (!v) return false;
+  selectedTags.clear();
+  (v.tags || '').split(',').filter(Boolean).forEach(t => selectedTags.add(t));
+  excludedTags.clear();
+  (v.excluded_tags || []).forEach(t => excludedTags.add(t));
+  excludedSubs.clear();
+  (v.excluded_subs || []).forEach(id => excludedSubs.add(id));
+  includedSubs.clear();
+  for (const [id, info] of Object.entries(v.included_subs || {})) includedSubs.set(id, info);
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
+  const tick = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.checked = val === '1'; };
+  set('projection', v.projection);
+  set('margin', v.margin);
+  set('outputSize', v.size);
+  tick('ignoreOverseas', v.mainland);
+  tick('mergeAuto', v.merge);
+  tick('worldMap', v.world);
+  tick('worldAntarctica', v.antarctica);
+  tick('edgeBands', v.edges);
+  set('edgeBandPx', v.edge_px);
+  return v;
+}
+
 async function generate() {
   const view = currentViewParams();
+  if (view) saveView();
   if (!view) {
     genError.textContent = 'Select at least one country or subdivision (or tick "World map").';
     genError.style.display = 'block';
@@ -3720,6 +3769,7 @@ function mxShowJob(job) {
     <div>Folder: <code>${escapeHtml(job.path)}</code></div>
     <div>${f(r.provinces)} provinces, ${f(r.states)} states (${f(r.impassable_states)} impassable), ${f(job.countries)} countries, ${f(r.strategic_regions)} strategic regions</div>
     <div>${f(r.victory_points)} victory points, ${f(r.railways)} railways, ${f(r.straits)} sea crossings over straits</div>
+    ${r.map_scale ? `<div>Map scale ${r.map_scale.km_per_px} km per pixel: distances in pixels (radar, railway guns, interception ...) &times; ${r.map_scale.factor}; lighting, day / night and tree seasons fitted to the frame${r.daynight && r.daynight.shaders && r.daynight.shaders.length ? '' : ' (<b>shaders not patched</b>: game files not as expected)'}</div>` : ''}
     <div>Checks: ${r.problems && r.problems.length ? `<b>${r.problems.map(escapeHtml).join('; ')}</b>` : '<b>all pass</b>'}</div>
     ${(r.warnings || []).map(w => `<div><b>${escapeHtml(w)}</b></div>`).join('')}
     <div class="hint">Enable it in the launcher's playset. In game, the political colours need the post effects on (settings.txt <code>draw_postfx=yes</code>).</div>`;
@@ -3801,25 +3851,48 @@ function mxStartPolling() {
   }, 1500);
 }
 
+// Every localStorage setting of this page (the tabs' saved settings, the view).
+function uiState() {
+  const out = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('mapTool.')) out[k] = localStorage.getItem(k);
+    }
+  } catch (e) { /* storage unavailable */ }
+  return out;
+}
+
+// The full request of a run: the view + every tab's settings + the mod's
+// (the HOI4 export's query); throws with a message on invalid settings.
+function fullRunQuery() {
+  const view = currentViewParams();
+  if (!view) throw new Error('Select at least one country or subdivision in the Countries tab first.');
+  const other = pvOtherTabParams();
+  const sr = {};
+  for (const [k, v] of Object.entries(srSave())) sr['sr_' + k] = v;
+  const mod = {};
+  for (const [k, el] of Object.entries(mxFields)) mod['mod_' + k] = el.value;
+  return new URLSearchParams({ ...pvQueryObject(view, other, pvSave()), ...sr, ...mod,
+                               game_dir: mxGameDir.value.trim(), mod_dir: mxModDir.value.trim() });
+}
+
 async function mxExport() {
   const view = currentViewParams();
   if (!view) { mxShowError('Select at least one country or subdivision in the Countries tab first.'); return; }
+  saveView();
   const s = {};
   for (const [k, el] of Object.entries(mxFields)) s[k] = el.value;
   try {
     localStorage.setItem(MX_STORE, JSON.stringify({ ...s, game_dir: mxGameDir.value.trim(), mod_dir: mxModDir.value.trim() }));
   } catch (e) { /* storage unavailable */ }
-  let other;
-  try { other = pvOtherTabParams(); } catch (err) { mxShowError(err.message); return; }
-  const sr = {};
-  for (const [k, v] of Object.entries(srSave())) sr['sr_' + k] = v;
-  const mod = {};
-  for (const [k, v] of Object.entries(s)) mod['mod_' + k] = v;
-  const params = new URLSearchParams({ ...pvQueryObject(view, other, pvSave()), ...sr, ...mod,
-                                       game_dir: mxGameDir.value.trim(), mod_dir: mxModDir.value.trim() });
+  let params;
+  try { params = fullRunQuery(); } catch (err) { mxShowError(err.message); return; }
   mxShowError('');
   document.getElementById('mxReport').innerHTML = '';
-  const resp = await fetch(`/api/hoi4/export?${params}`, { method: 'POST' });
+  // the page's state goes with the run: saved with its parameters file
+  const resp = await fetch(`/api/hoi4/export?${params}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ui: uiState() }) });
   const out = await resp.json();
   if (!resp.ok) { mxShowError(out.error || 'Export failed to start'); return; }
   document.getElementById('mxStatus').textContent = 'Exporting...';
@@ -3827,6 +3900,52 @@ async function mxExport() {
 }
 
 mxExportBtn.addEventListener('click', mxExport);
+
+// ---------- generation parameters: Save / Load ----------
+// Save: every setting (the full request + the page's state; the server adds
+// its own settings and what the tool runs on) as a file. Load: restores them
+// (server settings applied by the server, the page's from the file), then
+// reloads the page.
+document.getElementById('saveParams').addEventListener('click', async () => {
+  saveView();
+  let query = '';
+  try { query = fullRunQuery().toString(); } catch (e) { /* no view yet: the page state alone */ }
+  const resp = await fetch('/api/params/export', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, ui: uiState() }) });
+  if (!resp.ok) { alert('Saving the parameters failed.'); return; }
+  const blob = await resp.blob();
+  const name = (resp.headers.get('Content-Disposition') || '').match(/filename="?([^";]+)/);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name ? name[1] : 'earthtohoi4_params.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
+
+document.getElementById('loadParams').addEventListener('click', () => document.getElementById('loadParamsFile').click());
+document.getElementById('loadParamsFile').addEventListener('change', async ev => {
+  const file = ev.target.files[0];
+  ev.target.value = '';
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { alert('This file is not a parameters file (not JSON).'); return; }
+  const resp = await fetch('/api/params/import', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const out = await resp.json();
+  if (!resp.ok) { alert(out.error || 'Loading the parameters failed.'); return; }
+  const msg = ['Load these parameters? Every tab\'s settings are replaced, and the page reloads.'];
+  if (out.notes && out.notes.length) msg.push('', 'Note: ' + out.notes.join('; ') + '.');
+  if (out.result && out.result.state === 'error') msg.push('', 'That run failed: ' + out.result.error);
+  if (!confirm(msg.join('\n'))) return;
+  try {
+    for (const k of Object.keys(uiState())) localStorage.removeItem(k);
+    for (const [k, v] of Object.entries(out.ui || {})) if (k.startsWith('mapTool.')) localStorage.setItem(k, v);
+  } catch (e) { alert('The browser refused to store the settings.'); return; }
+  location.reload();
+});
 mxLoad().catch(err => mxShowError('HOI4 mod settings failed to load: ' + err.message));
 
 // ---------- refresh / update notice ----------
@@ -3882,7 +4001,7 @@ async function restartTool() {
   hideUpdateBanner();
   const overlay = document.createElement('div');
   overlay.className = 'shutdown-overlay';
-  overlay.innerHTML = '<div>Restarting the Map Tool with its current code&hellip;<br><span class="hint">Results already computed come back from the cache.</span></div>';
+  overlay.innerHTML = '<div>Restarting EarthToHoI4 with its current code&hellip;<br><span class="hint">Results already computed come back from the cache.</span></div>';
   document.body.appendChild(overlay);
   let oldBoot = pageBoot;
   try { oldBoot = (await fetchVersion()).boot; } catch (e) { /* use the page's */ }
@@ -3895,7 +4014,7 @@ async function restartTool() {
       if (v.boot !== oldBoot) { reloadOnTab(); return; }
     } catch (e) { /* not up yet */ }
   }
-  overlay.innerHTML = '<div>The Map Tool did not come back after 3 minutes.<br>Start it again from its shortcut.</div>';
+  overlay.innerHTML = '<div>EarthToHoI4 did not come back after 3 minutes.<br>Start it again from its shortcut.</div>';
 }
 
 async function checkForUpdate() {
@@ -3907,12 +4026,12 @@ async function checkForUpdate() {
     const key = 'disk:' + v.on_disk;
     if (updateDismissed === key) return;
     const files = v.changed_files.slice(0, 4).join(', ') + (v.changed_files.length > 4 ? ', ...' : '');
-    showUpdateBanner(`The Map Tool has been changed (${escapeHtml(files)}). Refresh to use the new version?`,
+    showUpdateBanner(`EarthToHoI4 has been changed (${escapeHtml(files)}). Refresh to use the new version?`,
                      'Refresh now', restartTool, key);
   } else if (v.running !== pageVersion) {
     const key = 'page:' + v.running;
     if (updateDismissed === key) return;
-    showUpdateBanner('The Map Tool was updated and restarted. Reload this page to use the new version?',
+    showUpdateBanner('EarthToHoI4 was updated and restarted. Reload this page to use the new version?',
                      'Reload page', reloadOnTab, key);
   } else {
     hideUpdateBanner();
