@@ -1670,7 +1670,7 @@ def write_fow(t, geo, water):
 WATER_DEP = np.array([0, 16, 47, 79, 141, 251, 502, 1004, 2008, 3012, 4016, 5020, 6024, 9000.0])
 WATER_LAT = np.arange(-80, 90, 5.0)
 WATER_COAST_KM = np.array([0, 15, 30, 60, 100, 160, 250, 400, 1e9])
-WATER_CACHE = Path(__file__).resolve().parent / "cache" / "hoi4_water_lut.npz"
+WATER_CACHE = Path(__file__).resolve().parent.parent / "cache" / "hoi4_water_lut.npz"
 
 
 def water_model(game):
@@ -2575,14 +2575,14 @@ def write_names(out, countries, van):
     _write(out / "common/names/zz_map_tool_names.txt", pdx.dump(entries))
 
 
-FLAGS_DIR = Path(__file__).resolve().parent / "data" / "flags"
+FLAGS_DIR = Path(__file__).resolve().parent.parent / "data" / "flags"
 GADM_TO_ISO2_EXTRA = {"XKO": "XK"}  # GADM codes GeoNames writes otherwise
 
 
 def _iso3_to_iso2():
     """ISO3 -> ISO2 from GeoNames' countryInfo.txt (City tab data)."""
     out = dict(GADM_TO_ISO2_EXTRA)
-    ci = Path(__file__).resolve().parent / "data" / "cities" / "countryInfo.txt"
+    ci = Path(__file__).resolve().parent.parent / "data" / "cities" / "countryInfo.txt"
     if ci.exists():
         for line in ci.read_text(encoding="utf-8", errors="replace").splitlines():
             f = line.split("\t")

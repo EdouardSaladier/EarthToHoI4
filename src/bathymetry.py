@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # the project (data/ ...)
 BATHY_DIR = ROOT / "data" / "bathymetry"
 TILE_PX = 10800
 TILE_DEG = 90.0

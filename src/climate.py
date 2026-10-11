@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # the project (data/ ...)
 CLIMATE_DIR = ROOT / "data" / "climate"
 VARIABLES = ("tas", "tasmin", "tasmax", "pr", "fd", "id", "r20mm", "sfcwind")
 URL = ("https://wbg-cckp.s3.amazonaws.com/data/era5-x0.25/{v}/era5-x0.25-historical/"

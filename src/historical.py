@@ -52,7 +52,7 @@ from scipy import ndimage, optimize, signal
 
 Image.MAX_IMAGE_PIXELS = None
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # the project (data/ ...)
 MAPS_DIR = ROOT / "historical_maps"   # config.json + built labels.png / map.json per map (ship with the tool)
 R_EARTH_KM = 6371.0
 REF_STEP_DEG = 0.004                  # reference water grid (~0.3-0.45 km)

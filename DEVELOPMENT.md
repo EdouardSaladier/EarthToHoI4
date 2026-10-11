@@ -4,6 +4,14 @@ How EarthToHoI4 works inside, and the rules that took real bugs to learn.
 
 ## Layout
 
+All the code is in `src/` (the Python modules and `templates/index.html`);
+the project root holds the docs, the launcher and what the tool reads and
+writes: `data/` (datasets), `cache/`, `color_presets/`, `runs/`, the settings
+files (`land_sea_settings.json`, `color_config.json`), `river_borders.json`.
+`core.CODE_DIR` is `src/`, `core.BASE_DIR` the project root. Run with
+`python src/app.py` (or `start_webui.bat`).
+
+
 | File | Role |
 |---|---|
 | `app.py` | Flask server: the web UI, its JSON API, the download manager, the per-stage results cache, the HOI4 export job |
@@ -19,7 +27,7 @@ How EarthToHoI4 works inside, and the rules that took real bugs to learn.
 | `hoi4mod.py`, `hoi4clean.py`, `pdx.py` | The mod export; the cleaner for the base game's scripts; a Paradox script parser / writer |
 | `palettes.py`, `color_presets/` | Country colours and presets |
 | `result_cache.py` | Disk cache of every stage's results |
-| `river_borders.json`, `cache/` | Small derived data shipped with the tool (rebuilt automatically when missing or stale; `python build_cache.py --clean` rebuilds it all) |
+| `river_borders.json`, `cache/` | Small derived data shipped with the tool (rebuilt automatically when missing or stale; `python src/build_cache.py --clean` rebuilds it all) |
 
 Datasets go to `data/<resource>/` (Download tab); nothing there is tracked.
 
@@ -145,7 +153,7 @@ thread) and the run's result. Written by every export before it starts
 (error + traceback + the step it failed at). `POST /api/params/export` /
 `POST /api/params/import` back the header's Save / Load buttons (loading
 applies the server settings, replaces the page's `mapTool.*` keys and
-reloads). `python run_params.py replay <file> [--export NAME]` reruns a file
+reloads). `python src/run_params.py replay <file> [--export NAME]` reruns a file
 with its settings, restoring the local ones afterwards.
 
 ## Testing

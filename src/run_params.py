@@ -13,7 +13,7 @@ the run (error and traceback if it failed) and the last server errors.
 - The web UI's "Save parameters" / "Load parameters" buttons download the
   current parameters / restore them from such a file.
 - Replay (for debugging):
-      python run_params.py replay <file.json> [--export "Mod name"]
+      python src/run_params.py replay <file.json> [--export "Mod name"]
   applies the file's settings (backing up and restoring the local ones),
   runs every tab for its request and, with --export, writes the mod.
 """
@@ -28,7 +28,8 @@ import threading
 import traceback
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+CODE = Path(__file__).resolve().parent   # src/
+ROOT = CODE.parent                       # the project (data/, runs/, .git)
 RUNS_DIR = ROOT / "runs"
 KEEP_RUNS = 30
 FORMAT = "earthtohoi4-params"
@@ -53,7 +54,7 @@ def code_version():
     """A content hash of the tool's code (*.py + templates), and the git commit
     if the folder is a clone (with a flag for local changes)."""
     h = hashlib.sha256()
-    for path in sorted(list(ROOT.glob("*.py")) + list((ROOT / "templates").glob("*.html"))):
+    for path in sorted(list(CODE.glob("*.py")) + list((CODE / "templates").glob("*.html"))):
         h.update(path.name.encode())
         h.update(path.read_bytes())
     out = {"code_hash": h.hexdigest()[:16]}

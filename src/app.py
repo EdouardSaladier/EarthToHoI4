@@ -51,7 +51,7 @@ def _record_request_error(sender, exception, **extra):
 
 got_request_exception.connect(_record_request_error, app)
 
-INDEX_HTML = (core.BASE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+INDEX_HTML = (core.CODE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
 
 # All Download-tab files are saved here, one subfolder per resource, rather
 # than left to the browser's own download folder, so this tool's data lives
@@ -497,7 +497,7 @@ def api_downloads_status():
 # the .py files and the page): the page compares it with what's on disk now
 # (code changed -> offers to restart the server) and with what it was loaded
 # with (server restarted with new code -> offers to reload the page).
-_ROOT = Path(__file__).resolve().parent
+_ROOT = Path(__file__).resolve().parent   # src/ (the code)
 _BOOT_ID = f"{os.getpid()}-{time.time():.0f}"
 
 
@@ -551,7 +551,7 @@ def api_restart():
     else:
         kwargs["start_new_session"] = True
     if not console:
-        log = open(_ROOT / "flask.log", "ab")
+        log = open(core.BASE_DIR / "flask.log", "ab")
         kwargs.update(stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     subprocess.Popen([sys.executable, str(_ROOT / "app.py")], **kwargs)
 
@@ -656,7 +656,7 @@ def _data_sig(*dirs):
         return _data_sig_memo[key][1]
     out = []
     for d in dirs:
-        path = DATA_DIR / d if not str(d).endswith((".json", ".shp")) else Path(core.__file__).resolve().parent / d
+        path = DATA_DIR / d if not str(d).endswith((".json", ".shp")) else core.BASE_DIR / d
         try:
             if path.is_dir():
                 out.append([d, sorted((e.name, e.stat().st_size, e.stat().st_mtime_ns)

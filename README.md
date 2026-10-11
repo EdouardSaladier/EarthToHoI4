@@ -47,7 +47,7 @@ game's countries are not loaded and its country-specific files are neutralised
 
 ```
 pip install -r requirements.txt
-python app.py
+python src/app.py
 ```
 
 Then open http://127.0.0.1:5000 (on Windows, `start_webui.bat` does both).
@@ -56,7 +56,7 @@ left to right. The HOI4 mod tab finds the game and your mod folder by itself
 (Steam, GOG, Microsoft Store); if it can't, choose them there.
 
 A command-line renderer for country maps also exists:
-`python render_map.py FRA DEU ITA --projection mercator --margin 10`.
+`python src/render_map.py FRA DEU ITA --projection mercator --margin 10`.
 
 ## Reporting a problem
 
@@ -69,7 +69,7 @@ current settings at any time; **Load parameters** restores them.
 
 If the tool or an exported mod crashes, open an issue and attach that file:
 it lets the run be reproduced exactly
-(`python run_params.py replay <file> [--export "Mod name"]`).
+(`python src/run_params.py replay <file> [--export "Mod name"]`).
 
 ## Data sources
 

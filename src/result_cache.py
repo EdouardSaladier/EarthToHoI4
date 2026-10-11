@@ -25,8 +25,8 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-CACHE_DIR = ROOT / "cache" / "results"
+ROOT = Path(__file__).resolve().parent          # src/: the modules whose code keys the stages
+CACHE_DIR = ROOT.parent / "cache" / "results"
 CACHE_VERSION = 1            # bump to drop every cached result
 MAX_BYTES = 4_000_000_000    # the whole results cache on disk
 ENABLED = os.environ.get("MAP_TOOL_NO_RESULT_CACHE", "") == ""
