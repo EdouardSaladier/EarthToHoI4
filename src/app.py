@@ -340,6 +340,8 @@ def _is_present(resource_id: str, filename: str) -> bool:
     any network call. A downloaded .zip only counts once it has actually
     been extracted (see `_extract_zip`) -- that's the point of extracting:
     the tool should find its data already sitting there, ready to use."""
+    if resource_id == "landcover":  # also a manual download under another name; never a partial one
+        return landcover.available()
     dest = _local_path(resource_id, filename)
     if _extracts(filename):
         return _extract_marker(dest).exists()
@@ -520,12 +522,61 @@ _RUNNING_FILES = _code_files()
 _RUNNING_VERSION = _version_of(_RUNNING_FILES)
 
 
+# ---- background jobs shown to the user --------------------------------------
+# Start-up preparation running in threads (caches, indexes, the land cover
+# pyramid), listed by /api/version so the page can say what is being prepared,
+# how long it takes and that closing the tool now would interrupt it.
+_bg_jobs = {}
+_bg_lock = threading.Lock()
+BG_SHOW_AFTER_S = 3  # quick jobs (caches already on disk) never show up
+
+
+def _bg_start(key, label, note, total=None):
+    with _bg_lock:
+        _bg_jobs[key] = {"label": label, "note": note, "started": time.time(), "done": 0, "total": total}
+
+
+def _bg_progress(key, done):
+    with _bg_lock:
+        if key in _bg_jobs:
+            _bg_jobs[key]["done"] = done
+
+
+def _bg_end(key):
+    with _bg_lock:
+        _bg_jobs.pop(key, None)
+
+
+def _background_jobs():
+    """[{label, note, progress (0-1 or None), eta_s (None = unknown), lost}]:
+    lost = closing the tool now throws the work away (else it resumes)."""
+    now = time.time()
+    with _bg_lock:
+        jobs = [dict(j) for j in _bg_jobs.values()]
+    out = []
+    for j in jobs:
+        el = now - j["started"]
+        if el < BG_SHOW_AFTER_S:
+            continue
+        prog = j["done"] / j["total"] if j["total"] else None
+        out.append({"label": j["label"], "note": j["note"], "progress": prog, "lost": False,
+                    "eta_s": el / prog * (1 - prog) if prog and prog > 0.02 else None})
+    st = landcover.build_status()
+    if st["status"] == "running":
+        prog = st.get("progress") or 0.0
+        el = now - (st["started"] or now)
+        out.append({"label": "Land cover for the Terrain tab", "progress": prog, "lost": True,
+                    "note": "one-time, about 10-20 min; closing EarthToHoI4 now restarts it from zero",
+                    "eta_s": el / prog * (1 - prog) if prog > 0.02 else None})
+    return out
+
+
 @app.get("/api/version")
 def api_version():
     now = _code_files()
     changed = sorted(n for n in set(now) | set(_RUNNING_FILES) if now.get(n) != _RUNNING_FILES.get(n))
     return jsonify({"boot": _BOOT_ID, "running": _RUNNING_VERSION, "on_disk": _version_of(now),
-                    "changed_files": changed})
+                    "changed_files": changed, "background": _background_jobs()})
 
 
 @app.post("/api/restart")
@@ -911,22 +962,31 @@ def _warm_coast_cache():
     countries at once (~0.3-2 s each, cached on disk afterwards)."""
     try:
         geometries = core.load_geometries()
-        for tag in geometries:
+        _bg_start("coast", "Coastline cache",
+                  "one-time, about 1-2 min; what is done is kept if EarthToHoI4 is closed", len(geometries))
+        for i, tag in enumerate(geometries):
             core.coastal_edge_masks(geometries, tag)
+            _bg_progress("coast", i + 1)
         print("Coastline cache ready.")
     except core.DataNotFoundError:
         pass
+    finally:
+        _bg_end("coast")
 
 
 def _warm_hydro_indexes():
     """Build the HydroLAKES / HydroRIVERS indexes in the background (~1 s +
     ~6 s), so the first lake cut or river map doesn't wait for them."""
-    core.load_lake_index()
-    index = core.load_river_index()
-    if index is not None:
-        core.river_dead_ends(index)
-        core.river_borders(core.load_geometries(progress=lambda *a: None), index)
-        print("River index ready.")
+    _bg_start("hydro", "Lake and river indexes", "about 10-30 s at every start")
+    try:
+        core.load_lake_index()
+        index = core.load_river_index()
+        if index is not None:
+            core.river_dead_ends(index)
+            core.river_borders(core.load_geometries(progress=lambda *a: None), index)
+            print("River index ready.")
+    finally:
+        _bg_end("hydro")
 
 
 # ---------- rivers tab ----------
@@ -1662,7 +1722,7 @@ def _terrain_from_args():
     if not 1.0 <= relief <= core.RELIEF_STRENGTH_MAX:
         raise core.RenderError(f"The relief exaggeration must be between 1 (off) and {core.RELIEF_STRENGTH_MAX:g}")
     if not landcover.available():
-        raise core.RenderError("The Copernicus land cover isn't downloaded (Download tab -> Copernicus Land Cover)")
+        raise core.RenderError(landcover.missing_message())
     if not landcover.pyramid_ready():
         landcover.start_build()
         raise _Preparing()
@@ -1711,7 +1771,7 @@ def _colormap_from_args():
 def _terrain_error(e):
     if isinstance(e, _Preparing):
         st = landcover.build_status()
-        return jsonify({"error": "Preparing the land cover (one-time, ~15 min)...", "preparing": True,
+        return jsonify({"error": "Preparing the land cover (one-time, about 10-20 min; keep EarthToHoI4 open)...", "preparing": True,
                         "status": st}), 503
     return jsonify({"error": str(e)}), 400
 
@@ -1984,10 +2044,14 @@ if __name__ == "__main__":
         threading.Thread(target=_warm_hydro_indexes, daemon=True).start()
         if cities.available():  # City tab: CSV parse + merging city parts, ~1.5 s
             def _warm_cities():
-                idx = cities.load_city_index()
-                # Per-city names for the labels (from the cache, or built once
-                # from alternateNamesV2.zip, ~10 s).
-                city_names.load_names(lambda: idx["id"].tolist(), cities.CITIES_CSV_PATH, wait=True)
+                _bg_start("cities", "City index and names", "a few seconds; the names once, ~10 s")
+                try:
+                    idx = cities.load_city_index()
+                    # Per-city names for the labels (from the cache, or built once
+                    # from alternateNamesV2.zip, ~10 s).
+                    city_names.load_names(lambda: idx["id"].tolist(), cities.CITIES_CSV_PATH, wait=True)
+                finally:
+                    _bg_end("cities")
             threading.Thread(target=_warm_cities, daemon=True).start()
         landcover.start_build()  # one-time land cover pyramid for the Terrain tab (no-op if ready / not downloaded)
     except core.DataNotFoundError as e:

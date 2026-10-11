@@ -55,6 +55,13 @@ Start with the **Download** tab ("Download all"), then go through the tabs
 left to right. The HOI4 mod tab finds the game and your mod folder by itself
 (Steam, GOG, Microsoft Store); if it can't, choose them there.
 
+The first terrain render prepares the land cover once, which takes about
+15 minutes. Keep the tool open until it's done. If you download the land
+cover yourself
+([Zenodo](https://zenodo.org/records/3243509): the 2 GB
+`..._discrete-classification_EPSG-4326.tif`), put it in `data/landcover/`.
+Any file name works.
+
 A command-line renderer for country maps also exists:
 `python src/render_map.py FRA DEU ITA --projection mercator --margin 10`.
 

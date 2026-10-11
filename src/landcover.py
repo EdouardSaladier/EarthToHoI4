@@ -59,8 +59,90 @@ _TO_IDX[_CODES] = np.arange(len(_CODES), dtype=np.uint8)       # code -> compact
 NCLS = len(_CODES)
 
 
+SOURCE_DIR = core.DATA_DIR / "landcover"
+SOURCE_SHAPE = (362880, 141120)   # width, height of the global discrete-classification map
+
+_inspected = {}                   # (path, size, mtime_ns) -> None (usable) or the problem
+
+
+def _inspect(path: Path):
+    """None if `path` is the complete global LC100 discrete-classification
+    BigTIFF, else what is wrong with it (reads the header and the last
+    strip's offset only)."""
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key in _inspected:
+        return _inspected[key]
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+            ifd = struct.unpack("<Q", head[8:])[0] if head[:4] == b"II+\x00" and len(head) == 16 else None
+            if ifd is None:
+                problem = "not a BigTIFF"
+            elif ifd >= st.st_size:  # the header is at the end of this file
+                problem = f"incomplete ({st.st_size / 1e9:.2f} GB of ~2.07 GB): download it again"
+            else:
+                f.seek(ifd)
+                tags = {}
+                for _ in range(struct.unpack("<Q", f.read(8))[0]):
+                    tag, typ, cnt = struct.unpack("<HHQ", f.read(12))
+                    tags[tag] = (typ, cnt, f.read(8))
+                shape = (_Source._scalar(tags[256]), _Source._scalar(tags[257]))
+                if shape != SOURCE_SHAPE:
+                    problem = (f"{shape[0]} x {shape[1]} px, not the global map "
+                               f"({SOURCE_SHAPE[0]} x {SOURCE_SHAPE[1]})")
+                elif 320 not in tags:  # the cover-fraction / probability layers have the same size, no colour table
+                    problem = "not the discrete-classification map (another Copernicus layer?)"
+                else:
+                    # End of the last strip vs the file size: an interrupted download.
+                    ends = []
+                    for t in (273, 279):
+                        typ, cnt, val = tags[t]
+                        size = {3: 2, 4: 4, 16: 8}[typ]
+                        f.seek(struct.unpack("<Q", val)[0] + size * (cnt - 1))
+                        ends.append(int.from_bytes(f.read(size), "little"))
+                    need = ends[0] + ends[1]
+                    problem = (None if need <= st.st_size else
+                               f"incomplete ({st.st_size / 1e9:.2f} of {need / 1e9:.2f} GB): download it again")
+    except (OSError, KeyError, struct.error, ValueError) as e:
+        problem = f"unreadable ({type(e).__name__})"
+    _inspected[key] = problem
+    return problem
+
+
+def _candidates():
+    """The Download tab's file first, then any other .tif / .tiff under
+    data/landcover/ (a manual download saved under another name -- "(1)",
+    a sub-folder), largest first."""
+    out = [SOURCE_PATH] if SOURCE_PATH.is_file() else []
+    if SOURCE_DIR.is_dir():
+        others = [p for p in SOURCE_DIR.rglob("*") if p.is_file() and p.suffix.lower() in (".tif", ".tiff")
+                  and p != SOURCE_PATH and PYRAMID_DIR not in p.parents]
+        out += sorted(others, key=lambda p: -p.stat().st_size)
+    return out
+
+
+def find_source():
+    """Path of the usable land cover GeoTIFF, or None."""
+    for p in _candidates():
+        if _inspect(p) is None:
+            return p
+    return None
+
+
 def available() -> bool:
-    return SOURCE_PATH.exists() and SOURCE_PATH.stat().st_size > 1_000_000_000
+    return find_source() is not None
+
+
+def missing_message() -> str:
+    """Why the land cover can't be used, for the UI."""
+    found = [(p, _inspect(p)) for p in _candidates()]
+    if not found:
+        return (f"The Copernicus land cover isn't downloaded (Download tab -> Copernicus Land Cover, "
+                f"or put {SOURCE_NAME} in {SOURCE_DIR})")
+    return ("The Copernicus land cover file can't be used: "
+            + "; ".join(f"{p.relative_to(SOURCE_DIR)}: {why}" for p, why in found)
+            + f". Expected the global discrete-classification map {SOURCE_NAME} (2.07 GB) in {SOURCE_DIR}")
 
 
 # ---- source reader ---------------------------------------------------------
@@ -141,10 +223,10 @@ def _get_source() -> _Source:
     global _source
     with _source_lock:
         if _source is None:
-            if not available():
-                raise core.DataNotFoundError("The Copernicus land cover isn't downloaded (Download tab -> "
-                                             "Copernicus Land Cover)")
-            _source = _Source(SOURCE_PATH)
+            path = find_source()
+            if path is None:
+                raise core.DataNotFoundError(missing_message())
+            _source = _Source(path)
         return _source
 
 
@@ -154,15 +236,34 @@ _build = {"status": "idle", "done_rows": 0, "total_rows": 0, "error": None, "sta
 _build_lock = threading.Lock()
 
 
+_pyramid_checked = {}   # file stats -> ready?
+
+
 def pyramid_ready() -> bool:
+    """done.json matches this version and source, and every level's tiles
+    are all there (a .bin cut short -- a build interrupted after an old
+    done.json, a copy that stopped -- would fail on reading)."""
     p = PYRAMID_DIR / "done.json"
-    if not p.exists():
+    src = find_source()
+    if not p.exists() or src is None:
         return False
+    files = [p] + [PYRAMID_DIR / f"level{k}{ext}" for k in LEVELS for ext in (".bin", ".idx.npy")]
+    try:
+        key = tuple((st.st_size, st.st_mtime_ns) for st in map(Path.stat, files)) + (src.stat().st_size,)
+    except OSError:
+        return False
+    if key in _pyramid_checked:
+        return _pyramid_checked[key]
     try:
         info = json.loads(p.read_text())
+        ok = info.get("version") == PYRAMID_VERSION and info.get("source_size") == src.stat().st_size
+        for k in LEVELS if ok else ():
+            idx = np.load(PYRAMID_DIR / f"level{k}.idx.npy")
+            ok = ok and int((idx[..., 0] + idx[..., 1]).max()) <= (PYRAMID_DIR / f"level{k}.bin").stat().st_size
     except (OSError, ValueError):
-        return False
-    return info.get("version") == PYRAMID_VERSION and info.get("source_size") == SOURCE_PATH.stat().st_size
+        ok = False
+    _pyramid_checked[key] = ok
+    return ok
 
 
 def build_status() -> dict:
@@ -185,13 +286,25 @@ def start_build():
 
 
 def _build_thread():
+    print("Preparing the land cover for the Terrain tab (one-time, about 10-20 min).\n"
+          "  Keep EarthToHoI4 open until it's done: closing it restarts this step from zero.", flush=True)
+    last = [-1]
+
+    def progress(_msg):
+        with _build_lock:
+            pct = int(100 * _build["done_rows"] / max(1, _build["total_rows"]))
+        if pct // 10 != last[0] // 10:
+            last[0] = pct
+            print(f"  Land cover: {pct}%", flush=True)
     try:
-        build_pyramid()
+        build_pyramid(progress=progress)
         with _build_lock:
             _build["status"] = "done"
+        print("Land cover ready.", flush=True)
     except Exception as e:  # reported to the UI
         with _build_lock:
             _build.update(status="error", error=f"{type(e).__name__}: {e}")
+        print(f"Preparing the land cover failed: {type(e).__name__}: {e}", flush=True)
 
 
 def build_pyramid(progress=None):
@@ -232,7 +345,7 @@ def build_pyramid(progress=None):
     for w in writers.values():
         w.close()
     (PYRAMID_DIR / "done.json").write_text(json.dumps({"version": PYRAMID_VERSION, "levels": list(LEVELS),
-                                                         "source_size": SOURCE_PATH.stat().st_size,
+                                                         "source_size": find_source().stat().st_size,
                                                          "seconds": round(time.time() - t0)}))
 
 

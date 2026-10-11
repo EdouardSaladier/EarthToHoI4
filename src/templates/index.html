@@ -72,6 +72,17 @@
     font-size: 13.5px;
   }
   .update-banner span { flex: 1; }
+  .bg-banner {
+    display: none;
+    padding: 8px 24px;
+    background: #3a331a;
+    border-bottom: 1px solid #b8962e;
+    font-size: 13px;
+  }
+  .bg-banner .bg-job { display: flex; align-items: center; gap: 10px; margin: 3px 0; }
+  .bg-banner .bg-bar { width: 140px; height: 6px; background: rgba(255,255,255,0.15); border-radius: 3px; overflow: hidden; flex: none; }
+  .bg-banner .bg-bar > div { height: 100%; background: #e0b84a; }
+  .bg-banner .hint { opacity: 0.8; }
   .tabs {
     display: flex;
     gap: 2px;
@@ -1684,7 +1695,8 @@ function trShowPreparing(st) {
   document.getElementById('trPrepFill').style.width = pct + '%';
   document.getElementById('trPrepText').textContent = st.status === 'error'
     ? `Preparing the land cover failed: ${st.error}`
-    : `Preparing the land cover (one-time, ~15 min): ${pct}%. The terrain renders when it's done.`;
+    : `Preparing the land cover (one-time, about 10-20 min): ${pct}%. The terrain renders when it's done. `
+      + `Keep EarthToHoI4 open meanwhile: closing it restarts this step from zero.`;
 }
 
 function trWaitForPyramid() {
@@ -2477,7 +2489,7 @@ loadDownloads();
 
 // ---------- close app ----------
 document.getElementById('closeApp').addEventListener('click', async () => {
-  if (!confirm('Stop the EarthToHoI4 server? You will need to relaunch it to use this page again.')) return;
+  if (!confirm(bgWarning('Stop the EarthToHoI4 server? You will need to relaunch it to use this page again.'))) return;
   try {
     await fetch('/api/shutdown', { method: 'POST' });
   } catch (err) {
@@ -3958,6 +3970,47 @@ mxLoad().catch(err => mxShowError('HOI4 mod settings failed to load: ' + err.mes
 let pageVersion = null;
 let pageBoot = null;
 let updateDismissed = null;  // the version the user said "Later" to
+let bgJobs = [];  // background preparation running on the server (/api/version)
+
+function fmtEta(s) {
+  if (s === null || s === undefined) return '';
+  if (s < 90) return ', less than 2 min left';
+  return `, about ${Math.round(s / 60)} min left`;
+}
+
+// What the server is preparing in the background, on every tab: what it is,
+// how far it got, and whether closing the tool now would lose it.
+function showBackground(jobs) {
+  bgJobs = jobs || [];
+  let bar = document.getElementById('bgBanner');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'bgBanner';
+    bar.className = 'bg-banner';
+    const upd = document.getElementById('updateBanner');
+    document.body.insertBefore(bar, upd ? upd.nextSibling : document.body.firstChild);
+  }
+  if (!bgJobs.length) { bar.style.display = 'none'; return; }
+  const lost = bgJobs.some(j => j.lost);
+  bar.innerHTML = `<div><b>EarthToHoI4 is preparing data in the background.</b> `
+    + (lost ? 'Keep EarthToHoI4 running until this is done: do not close its console window or press Close.'
+            : 'You can keep working; some tabs may be slower until it is done.') + '</div>'
+    + bgJobs.map(j => {
+        const pct = j.progress === null ? null : Math.round(100 * j.progress);
+        return `<div class="bg-job"><span>${escapeHtml(j.label)}</span>`
+          + (pct === null ? '' : `<div class="bg-bar"><div style="width:${pct}%"></div></div><span>${pct}%${fmtEta(j.eta_s)}</span>`)
+          + `<span class="hint">(${escapeHtml(j.note)})</span></div>`;
+      }).join('');
+  bar.style.display = 'block';
+}
+
+// A confirm() text, with a warning when closing now would throw work away.
+function bgWarning(text) {
+  const lost = bgJobs.filter(j => j.lost);
+  if (!lost.length) return text;
+  return text + '\n\nStill being prepared: ' + lost.map(j => `${j.label} (${Math.round(100 * (j.progress || 0))}%)`).join(', ')
+    + '. Stopping EarthToHoI4 now throws that work away: it will start again from zero next time.';
+}
 
 function currentTab() {
   const b = document.querySelector('.tab-btn.active');
@@ -3998,6 +4051,7 @@ function reloadOnTab() {
 }
 
 async function restartTool() {
+  if (bgJobs.some(j => j.lost) && !confirm(bgWarning('Restart EarthToHoI4?'))) return;
   hideUpdateBanner();
   const overlay = document.createElement('div');
   overlay.className = 'shutdown-overlay';
@@ -4021,6 +4075,7 @@ async function checkForUpdate() {
   if (document.hidden) return;
   let v;
   try { v = await fetchVersion(); } catch (e) { return; }  // server down / restarting
+  showBackground(v.background);
   if (pageVersion === null) { pageVersion = v.running; pageBoot = v.boot; }
   if (v.on_disk !== v.running) {
     const key = 'disk:' + v.on_disk;
