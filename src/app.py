@@ -9,6 +9,7 @@ Usage:
 import io
 import json
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -284,13 +285,33 @@ _NO_EXTRACT = {f.get("filename") or os.path.basename(urllib.parse.urlparse(f["ur
                for r in DOWNLOAD_RESOURCES for f in r["files"] if f.get("extract") is False}
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """The system's trusted roots + certifi's (Mozilla's) bundle.
+
+    Windows fills its root store lazily: a root is only fetched from Windows
+    Update the first time a browser / CryptoAPI meets it, and Python never
+    triggers that. On machines that have never seen them, the roots behind
+    HydroSHEDS (GTS Root R4 via GlobalSign) and geo.vliz.be (HARICA) are
+    missing -> CERTIFICATE_VERIFY_FAILED. certifi ships them all."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(cafile=certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+
+SSL_CONTEXT = _ssl_context()
+
+
 def _remote_size(url: str):
     if url in _size_cache:
         return _size_cache[url]
     try:
         # Explicit User-Agent: HydroSHEDS' Cloudflare front rejects urllib's default one.
         req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "map-tool/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=SSL_CONTEXT) as resp:
             size = int(resp.headers.get("Content-Length", 0)) or None
     except Exception:
         size = None
@@ -300,7 +321,7 @@ def _remote_size(url: str):
         # Content-Range.
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "map-tool/1.0", "Range": "bytes=0-0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10, context=SSL_CONTEXT) as resp:
                 total = resp.headers.get("Content-Range", "").rpartition("/")[2]
                 size = int(total) if total.isdigit() else None
         except Exception:
@@ -400,7 +421,7 @@ def _download_worker(resource_id: str, filename: str, url: str):
         else:
             _set_state(key, status="downloading", bytes=0, total=None, error=None)
             req = urllib.request.Request(url, headers={"User-Agent": "map-tool/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as resp:
                 total = int(resp.headers.get("Content-Length") or 0) or None
                 _set_state(key, total=total)
                 downloaded = 0

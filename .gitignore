@@ -29,3 +29,4 @@ CLAUDE.md
 # Parameters of past runs (run_params.py)
 runs/
 workshop/Finland_Map_description.txt
+flask.err.log
