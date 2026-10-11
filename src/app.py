@@ -411,20 +411,24 @@ def _download_worker(resource_id: str, filename: str, url: str):
     dest = _local_path(resource_id, filename)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
+    t0 = time.time()
     try:
-        expected = _remote_size(url)
-        if dest.exists() and expected is not None and dest.stat().st_size == expected:
-            # Already fully fetched (e.g. a zip downloaded but not yet
-            # extracted) -- skip straight to using it.
+        # The download is written to .part and renamed only once complete, so
+        # an existing file is whole (e.g. a zip downloaded but not extracted).
+        # No HEAD to compare sizes: on the EEZ's WFS a HEAD builds the export.
+        if dest.exists() and dest.stat().st_size > 0:
             downloaded = dest.stat().st_size
             _set_state(key, status="downloading", bytes=downloaded, total=downloaded, error=None)
+            _dl_log(f"{key}: already downloaded ({_mb(downloaded)}), using it")
         else:
             _set_state(key, status="downloading", bytes=0, total=None, error=None)
+            _dl_log(f"{key}: downloading from {urllib.parse.urlparse(url).netloc} ...")
             req = urllib.request.Request(url, headers={"User-Agent": "map-tool/1.0"})
             with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as resp:
                 total = int(resp.headers.get("Content-Length") or 0) or None
                 _set_state(key, total=total)
                 downloaded = 0
+                next_pct = 25
                 with open(tmp, "wb") as f:
                     while True:
                         chunk = resp.read(262144)
@@ -433,18 +437,33 @@ def _download_worker(resource_id: str, filename: str, url: str):
                         f.write(chunk)
                         downloaded += len(chunk)
                         _set_state(key, bytes=downloaded)
+                        if total and next_pct < 100 and downloaded * 100 >= next_pct * total:
+                            _dl_log(f"{key}: {next_pct}% ({_mb(downloaded)} / {_mb(total)})")
+                            next_pct += 25
             os.replace(tmp, dest)
+            _dl_log(f"{key}: downloaded {_mb(downloaded)} in {time.time() - t0:.0f} s")
 
         if _extracts(filename):
+            _dl_log(f"{key}: extracting ...")
             _extract_zip(dest, key)
 
         _set_state(key, status="done", bytes=downloaded, total=downloaded)
+        _dl_log(f"{key}: done")
     except Exception as e:
         tmp.unlink(missing_ok=True)
         _set_state(key, status="error", error=str(e))
+        _dl_log(f"{key}: FAILED -- {e}")
     finally:
         with _dl_lock:
             _dl_queued.discard(key)
+
+
+def _dl_log(msg: str):
+    print(f"[download] {msg}", flush=True)
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1e6:,.1f} MB"
 
 
 def _queue_download(resource_id: str, filename: str, url: str):
@@ -452,11 +471,16 @@ def _queue_download(resource_id: str, filename: str, url: str):
     if _is_present(resource_id, filename):
         size = _local_size(resource_id, filename)
         _set_state(key, status="done", bytes=size or 0, total=size)
+        _dl_log(f"{key}: already present, skipped")
         return key
     with _dl_lock:
         if key in _dl_queued:
             return key
         _dl_queued.add(key)
+        # Reported as queued at once: the page stops polling when no file is
+        # reported active, and a worker may wait for a free slot.
+        _dl_state[key] = {"status": "pending", "bytes": 0, "total": None, "error": None}
+    _dl_log(f"{key}: queued")
     _dl_pool.submit(_download_worker, resource_id, filename, url)
     return key
 
@@ -481,8 +505,13 @@ def api_downloads():
             filename = _filename_for(f)
             size = sizes.get(f["url"]) or f.get("size_bytes")
             key = f'{r["id"]}/{filename}'
+            downloaded = _is_present(r["id"], filename)
             state = _get_state(key)
-            downloaded = state["status"] == "done" or _is_present(r["id"], filename)
+            if state["status"] == "done" and not downloaded:
+                # Downloaded earlier in this session, then moved / deleted.
+                with _dl_lock:
+                    _dl_state.pop(key, None)
+                state = _get_state(key)
             files.append({**f, "filename": filename, "size_bytes": size, "key": key,
                           "downloaded": downloaded, "state": state})
         sized = [f["size_bytes"] for f in files if f["size_bytes"] is not None]

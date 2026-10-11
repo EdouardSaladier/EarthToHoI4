@@ -2314,7 +2314,9 @@ function controlHtml(key) {
     const total = (f.state && f.state.total) || f.size_bytes;
     const pct = total ? Math.min(100, (bytes / total) * 100) : 0;
     const verb = st === 'extracting' ? 'Extracting' : 'Downloading';
-    const text = st === 'pending' ? 'queued...' : `${verb}: ${total ? formatBytes(bytes) + ' / ' + formatBytes(total) : formatBytes(bytes)}`;
+    const text = st === 'pending' ? 'queued...'
+      : (st === 'downloading' && bytes === 0) ? 'Waiting for the server to prepare the file...'
+      : `${verb}: ${total ? formatBytes(bytes) + ' / ' + formatBytes(total) : formatBytes(bytes)}`;
     return `
       ${label}
       <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
@@ -2446,13 +2448,26 @@ async function startDownload(resourceId, label) {
     renderControl(k);
   });
   updateSummary();
-  ensurePolling();
 
-  await fetch('/api/downloads/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resource_id: resourceId, label: label ?? null }),
-  });
+  try {
+    const r = await fetch('/api/downloads/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_id: resourceId, label: label ?? null }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  } catch (err) {
+    keys.forEach(k => {
+      if (fileState[k].state && fileState[k].state.status === 'pending') {
+        fileState[k].state = { status: 'error', bytes: 0, total: null, error: `Could not start: ${err.message}` };
+        renderControl(k);
+      }
+    });
+    updateSummary();
+    return;
+  }
+  // Polled once the server has queued them (it reports them at once).
+  ensurePolling();
 }
 
 document.getElementById('downloadAllBtn').addEventListener('click', () => startDownload('all', null));
@@ -2472,11 +2487,15 @@ async function pollStatus() {
   let anyActive = false;
   for (const key in fileState) {
     const s = status[key];
-    if (!s) continue;
-    fileState[key].state = s;
-    if (s.status === 'done') fileState[key].downloaded = true;
-    if (['downloading', 'pending', 'extracting'].includes(s.status)) anyActive = true;
-    renderControl(key);
+    if (s) {
+      fileState[key].state = s;
+      if (s.status === 'done') fileState[key].downloaded = true;
+      renderControl(key);
+    }
+    // A file still shown as active keeps the polling going, even if the
+    // server hasn't reported it yet.
+    const shown = fileState[key].state && fileState[key].state.status;
+    if (!fileState[key].downloaded && ['downloading', 'pending', 'extracting'].includes(shown)) anyActive = true;
   }
   updateSummary();
   if (!anyActive) {
