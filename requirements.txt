@@ -1,0 +1,8 @@
+flask>=3.0
+numpy>=1.26
+scipy>=1.11
+pillow>=10.0
+shapely>=2.0
+pyshp>=2.3
+opencv-python>=4.8
+unidecode>=1.3

@@ -1,0 +1,26 @@
+# Downloaded datasets (GADM, NASA, HydroSHEDS, Copernicus, GeoNames, ...):
+# every user downloads them from the Download tab.
+data/
+
+# Results cache (every tab's renders, up to 4 GB) and data derived from the
+# game's own files: rebuilt on demand.
+cache/results/
+cache/hoi4_water_lut.npz
+
+# Per-user settings (defaults apply when missing)
+color_config.json
+land_sea_settings.json
+color_presets/*.json
+
+# Runtime
+flask.log
+__pycache__/
+*.pyc
+
+# Developer harnesses and their outputs (not part of the tool)
+_dev/
+
+# Session notes for the AI assistant (personal paths / history); DEVELOPMENT.md is the published version
+CLAUDE.md
+/cache
+/historical_maps
