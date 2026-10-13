@@ -517,10 +517,13 @@ def parse_sea_areas(states_csv: str | None, n: int):
     return (area, zone) if area.any() else None
 
 
-def build_regions(pimg: Image.Image, definition: str, states_csv: str | None, settings=None, view=None):
+def build_regions(pimg: Image.Image, definition: str, states_csv: str | None, settings=None, view=None,
+                  drowned_depth=None):
     """(regions list, report, region id per province (array), P) -- see the
     module docstring. Each region: id, name, kind (land / sea), provinces,
     states, px, centre (x, y), and with `view` (the render's debug["view"])
+    -- `drowned_depth` (core.drowned_depth_m) gives the naval terrain the
+    depth over land a sea level rise drowned, which GEBCO reads as land --
     and the climate data, "climate" (12 monthly means per variable) and
     "weather" (12 HOI4 weather periods, climate.weather_month)."""
     t0 = time.time()
@@ -910,7 +913,7 @@ def build_regions(pimg: Image.Image, definition: str, states_csv: str | None, se
                         "below_min": int((v < s[f"{kind}_min"]).sum()), "above_max": int((v > s[f"{kind}_max"]).sum())}
     report["sea_with_islands"] = sum(1 for g in regions if g["kind"] == "sea" and g["states"])
     report["weather"] = _add_weather(regions, prov_region, P, view)
-    report["naval_terrain"] = _add_naval_terrain(regions, prov_region, P, ptype, view)
+    report["naval_terrain"] = _add_naval_terrain(regions, prov_region, P, ptype, view, drowned_depth)
     report["seconds"] = round(time.time() - t0, 2)
     return regions, report, prov_region, P
 
@@ -1011,9 +1014,12 @@ def _km_per_px(view, x, y):
     return max(hav(0, 1), 1e-6), max(hav(0, 2), 1e-6)
 
 
-def _add_naval_terrain(regions, prov_region, P, ptype, view):
+def _add_naval_terrain(regions, prov_region, P, ptype, view, drowned_depth=None):
     """g["naval_terrain"] and g["naval"] (the measures) for every sea
-    region; the report counts them."""
+    region; the report counts them. `drowned_depth` (metres per pixel, from
+    a sea level rise) is taken over the bathymetry where it is deeper: the
+    drowned land is sea here but still land to GEBCO, which would read it
+    as 0 m and call a flooded plain a shallow shelf of nothing."""
     import bathymetry
     import core
     sea_regions = [g for g in regions if g["kind"] == "sea"]
@@ -1072,6 +1078,8 @@ def _add_naval_terrain(regions, prov_region, P, ptype, view):
             gy = view["win_ymin"] + (h - (ys + 0.5)) / view["scale"]
             lon, lat, _ok = core._unproject(view["projection"], view["center"], gx, gy)
             dep = bathymetry.depth_m(lat, lon)
+            if drowned_depth is not None:
+                dep = np.maximum(dep, drowned_depth[ys, xs])
             meas["median_depth_m"] = int(np.median(dep))
             meas["shallow_share"] = round(float((dep < NAVAL_SHALLOW[0]).mean()), 3)
         # water cut thin by the frame's left / right edge (the edge bands' sea,

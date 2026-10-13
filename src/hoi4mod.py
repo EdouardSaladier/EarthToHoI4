@@ -1076,6 +1076,32 @@ class Geo:
         for a in self.nbrs:
             self.nbrs[a].sort(reverse=True)
             self.nbrs[a] = [b2 for _c, b2 in self.nbrs[a]]
+        # contacts across the map's wrap (last column against the first).
+        # Kept apart from `nbrs`, so railways / state connectivity / straits /
+        # unit directions stay geometric -- but the game builds its own
+        # adjacency from the bitmap *with* the wrap, so a land province the
+        # wrap puts against the sea is coastal to it and needs a port building
+        # or the game crashes on start (see `write_map_text`). Only reached
+        # when land runs to the left / right edge, i.e. with the edge bands off.
+        self.wrap = defaultdict(list)
+        self.wrap_xy = {}
+        ca, cb = P[:, -1], P[:, 0]
+        mw = ca != cb
+        if mw.any():
+            yy = np.nonzero(mw)[0].astype(np.float64)
+            pa, pb = ca[mw].astype(np.int64), cb[mw].astype(np.int64)
+            wk = np.concatenate([pa * self.n + pb, pb * self.n + pa])
+            wx = np.concatenate([np.full(len(pa), self.w - 1.0), np.zeros(len(pb))])
+            wy = np.concatenate([yy, yy])
+            uw, iw, cw = np.unique(wk, return_inverse=True, return_counts=True)
+            sxw, syw = np.bincount(iw, wx), np.bincount(iw, wy)
+            for i, k in enumerate(uw.tolist()):
+                self.wrap_xy[int(k)] = (sxw[i] / cw[i], syw[i] / cw[i])
+                a, b2 = divmod(int(k), self.n)
+                self.wrap[a].append((int(cw[i]), b2))
+            for a in self.wrap:
+                self.wrap[a].sort(reverse=True)
+                self.wrap[a] = [b2 for _c, b2 in self.wrap[a]]
 
     def xy(self, flat_idx):
         return int(flat_idx % self.w), int(flat_idx // self.w)
@@ -1193,6 +1219,64 @@ def _fmt(v):
 
 
 # ------------------------------------------------------------------ main
+# ---- map size: the unpatched game takes ~13.1M px (a 50 MiB terrain buffer
+# at 4 bytes / px), texture files <= 16 MiB (heightmap.bmp) and <= 256 map
+# tiles of 256 px. The map size unlocker (MapSizeUnlocker/hoi4_map_size_patcher.py
+# in the game folder) patches those in hoi4.exe; its patterns are read here
+# (read only) to tell whether a big map (Countries tab "Double size") loads.
+EXE_LIMITS = [  # (name, pattern, groups, vanilla value, struct format)
+    ("buffer", rb"\xC7[\x80-\x87]\x50\x03\x00\x00(?P<a>....)\xB9(?P<b>....)\xE8", ("a", "b"), 0x3200000, "<I"),
+    ("texture", rb"\xE8....\x3D(?P<a>....)\x0F\x86....\x80\x3D", ("a",), 0x1000000, "<I"),
+    ("tile", rb"\x44\x0F\xB6\xE2\x44\x03\xE0\x41\x8B\x40\x44\x99\x41\xC1\xFC(?P<a>.)"
+             rb"\x0F\xB6\xCA\x03\xC8\x41\x8B\x40\x40\x99\xC1\xF9(?P<b>.)", ("a", "b"), 8, "B"),
+]
+MAX_MAP_TILES = 256
+
+
+def exe_map_limits(game):
+    """{"buffer": bytes, "texture": bytes, "tile": shift} read from the game's
+    hoi4.exe (vanilla values unless patched), or None if it can't be read."""
+    try:
+        data = (Path(game) / "hoi4.exe").read_bytes()
+    except OSError:
+        return None
+    out = {}
+    for name, pat, groups, vanilla, fmt in EXE_LIMITS:
+        vals = []
+        for m in re.finditer(pat, data, re.DOTALL):
+            v = {struct.unpack(fmt, m.group(g))[0] for g in groups}
+            if len(v) == 1 and min(v) >= vanilla:
+                vals.append(v.pop())
+        if len(vals) != 1:
+            return None  # another game version: patterns not found
+        out[name] = vals[0]
+    return out
+
+
+def map_size_problems(game, W, H):
+    """What keeps a W x H map from loading in this game's hoi4.exe ([] = fine)."""
+    need = {"buffer": W * H * 4, "texture": W * H + 2048}  # heightmap.bmp: 8 bit + palette
+    if need["buffer"] <= EXE_LIMITS[0][3] and need["texture"] <= EXE_LIMITS[1][3]:
+        return []
+    fix = (f"python hoi4_map_size_patcher.py --width {W} --height {H} in the game's MapSizeUnlocker folder "
+           "(again after every game update / file check)")
+    lim = exe_map_limits(game) if game else None
+    if lim is None:
+        return [f"the map is {W} x {H} ({W * H:,} px), over the unpatched game's ~13.1M px, and hoi4.exe "
+                f"couldn't be checked: make sure it is patched -- {fix}"]
+    probs = []
+    if lim["buffer"] < need["buffer"]:
+        probs.append(f"terrain buffer {lim['buffer'] // 2**20} MiB < {-(-need['buffer'] // 2**20)} MiB needed")
+    if lim["texture"] < need["texture"]:
+        probs.append(f"MAX_TEXTURE_SIZE {lim['texture'] // 2**20} MiB < {-(-need['texture'] // 2**20)} MiB needed")
+    tiles = (W >> lim["tile"]) * (H >> lim["tile"])
+    if tiles > MAX_MAP_TILES:
+        probs.append(f"{1 << lim['tile']} px tiles: {tiles} map tiles > {MAX_MAP_TILES}")
+    if probs:
+        return [f"hoi4.exe isn't patched for a {W} x {H} map ({'; '.join(probs)}): the game will crash. Run {fix}"]
+    return []
+
+
 def build_mod(src, settings, out, game=None, progress=lambda msg: None):
     """Writes the mod into `out` (a folder; emptied first). src: dict from
     app._hoi4_sources. Returns a report."""
@@ -1213,9 +1297,30 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
     pimg = src["provinces_img"]
     P, ptype_arr, pstate, states_named = strategic.parse_inputs(pimg, src["definition"], src["states_csv"])
     H, W = P.shape
+    report["map_size"] = [W, H]
+    report["warnings"] += map_size_problems(van.game, W, H)
+    # the game's province border limit (the Provinces tab keeps maps under it;
+    # a map made before that was added, or by hand, may not be)
+    import provinces as _provinces
+    report["province_borders"] = nb = _provinces.border_count(P)
+    if nb > _provinces.GAME_MAX_BORDERS:
+        report["warnings"].append(
+            f"{nb:,} province borders, over the {_provinces.GAME_MAX_BORDERS:,} the game draws: it will stop "
+            f"drawing province borders over large parts of the map -- make at most ~{_provinces.MAX_PROVINCES:,} "
+            "provinces (Provinces tab, target number)")
     n = int(P.max()) + 1
     ptype = np.full(n, -1, dtype=np.int8)
     ptype[:len(ptype_arr)] = ptype_arr[:n]
+    # land at the left / right edge: the game wraps the map there, so that land
+    # is adjacent to whatever is on the other edge -- sea (it becomes coastal
+    # and gets a port here, else the game crashes on start) or land (armies
+    # walk across the seam). The Countries tab's HOI4 edge bands prevent it.
+    edge = ptype[np.unique(np.concatenate([P[:, 0], P[:, -1]]))]
+    if (edge == LAND).any():
+        report["warnings"].append(
+            f"{int((edge == LAND).sum())} land provinces touch the left / right edge of the map, which the "
+            "game wraps: they are adjacent to the opposite edge (coastal over the wrap, or land armies can "
+            'cross the seam). Tick "HOI4 edge bands" on the Countries tab to keep land off the edges.')
     hm = np.asarray(src["heightmap"].convert("L"))
     geo = Geo(P, ptype, hm)
     report["provinces_raised"] = geo.raised
@@ -1522,7 +1627,7 @@ def write_map_images(out, src, geo, states, state_of, van, report):
         (t / "colormap_rgb_cityemissivemask_a.dds").write_bytes(colormap.dds_bytes(src["colormap"]))
     else:
         report["warnings"].append("no colour map (Blue Marble missing): the game's own is used, stretched")
-    write_water_colormaps(t, src["view"], geo, van)
+    write_water_colormaps(t, src["view"], geo, van, src.get("drowned_depth"))
     write_fow(t, geo, (geo.ptype[geo.P] != LAND).astype(np.float64))
     # cities.bmp: every pixel the "western" city group (index 15, like vanilla's
     # default), impassable land none (0)
@@ -1765,11 +1870,16 @@ def water_colours(lat, dep, coast_km, model):
     return np.clip(out + off, 0, 255)
 
 
-def write_water_colormaps(t, view, geo, van):
+def write_water_colormaps(t, view, geo, van, drowned_depth=None):
     """colormap_water_0/1/2.dds (half, quarter, eighth of the map): from the
     bathymetry with vanilla's colours (water_model); without the bathymetry,
     the base game's water colours sampled at the same place on Earth (its map
-    georeferenced, GEO_X / GEO_Y). DXT5."""
+    georeferenced, GEO_X / GEO_Y). DXT5.
+
+    `drowned_depth` (core.drowned_depth_m, metres per pixel of the render)
+    is land a sea level rise turned into sea: GEBCO still reads it as land,
+    0 m, which would paint a drowned plain in the palest shore colour, so
+    the deeper of the two readings is used."""
     import core
     h0, w0 = (geo.h + 1) // 2, (geo.w + 1) // 2
     model = water_model(van.game)
@@ -1778,6 +1888,10 @@ def write_water_colormaps(t, view, geo, van):
         yy, xx = np.mgrid[0:h0, 0:w0]
         lon, lat = px_lonlat(view, (xx * 2 + 0.5).ravel(), (yy * 2 + 0.5).ravel())
         dep = np.asarray(bathymetry.depth_m(lat, lon, reduce=2), float).reshape(h0, w0)
+        if drowned_depth is not None:
+            dd = np.zeros((h0 * 2, w0 * 2), np.float32)
+            dd[:geo.h, :geo.w] = drowned_depth[:geo.h, :geo.w]
+            dep = np.maximum(dep, dd.reshape(h0, 2, w0, 2).max(axis=(1, 3)))
         water = np.ones((h0 * 2, w0 * 2), bool)
         water[:geo.h, :geo.w] = geo.ptype[geo.P] != LAND
         water = water.reshape(h0, 2, w0, 2).any(axis=(1, 3))
@@ -1820,6 +1934,36 @@ def write_water_colormaps(t, view, geo, van):
         (t / f"colormap_water_{i}.dds").write_bytes(dds_dxt5(img.resize((w, h), Image.BILINEAR)))
 
 
+def write_faction_theaters(out, van, region_ids, report):
+    """The base game's AI faction theaters name its own strategic regions, which
+    this map doesn't have ("western_europe: region list contains invalid entries
+    (max id = 243!)" -- 18 of those in the user's France map). Each theater
+    keeps only the ids this map has; one left without any goes. Written before
+    the base-game clean-up, which leaves files the export wrote alone."""
+    d = van.game / "common/ai_faction_theaters"
+    if not d.is_dir():
+        return
+    kept = dropped = 0
+    for f in sorted(d.glob("*.txt")):
+        entries = []
+        for k, o, v in pdx.read(f):
+            if not isinstance(v, list) or pdx.get(v, "regions") is None:
+                entries.append((k, o, v))
+                continue
+            new = []
+            for k2, o2, v2 in v:
+                if k2 == "regions" and isinstance(v2, list):
+                    v2 = [e for e in v2 if str(e[2]).isdigit() and int(e[2]) in region_ids]
+                new.append((k2, o2, v2))
+            if pdx.get(new, "regions"):
+                entries.append((k, o, new))
+                kept += 1
+            else:
+                dropped += 1
+        _write(out / "common/ai_faction_theaters" / f.name, pdx.dump(entries))
+    report["faction_theaters"] = {"kept": kept, "dropped": dropped}
+
+
 def write_map_text(out, src, geo, states, state_of, vps, van, report):
     import strategic
     m = out / "map"
@@ -1831,6 +1975,7 @@ def write_map_text(out, src, geo, states, state_of, vps, van, report):
     for g in src["regions"]:
         _write(m / "strategicregions" / f"{g['id']}-{ascii_name(g['name'])}.txt", strategic.region_file(g))
     _write(m / "weatherpositions.txt", weather_positions(src["regions"], geo))
+    write_faction_theaters(out, van, {int(g["id"]) for g in src["regions"]}, report)
     for name in ("default.map", "continent.txt", "seasons.txt", "cities.txt", "colors.txt"):
         sp = van.game / "map" / name
         if sp.exists():
@@ -1839,8 +1984,14 @@ def write_map_text(out, src, geo, states, state_of, vps, van, report):
     _write(m / "adjacency_rules.txt", "# no adjacency rules (the base game's name its own canals' provinces)\n")
     write_ambient(m, van, W, H, geo)
 
-    # coast contacts: land province -> (best sea neighbour, contact point)
+    # coast contacts: land province -> (best sea neighbour, contact point).
+    # A land province whose only sea neighbour is across the map's wrap counts
+    # too: the game reads coastality off the bitmap, wrap included, and a
+    # province it calls coastal with no port building crashes the game on start
+    # ("Province N is setup as coastal but has no port building in the
+    # nudger"). definition.csv's coastal column is built the same way.
     coast = {}
+    wrap_coast = []
     for p in range(1, geo.n):
         if geo.ptype[p] != LAND:
             continue
@@ -1848,6 +1999,13 @@ def write_map_text(out, src, geo, states, state_of, vps, van, report):
         if seas:
             q = seas[0]  # most shared border
             coast[p] = (q, geo.contact_xy[p * geo.n + q], geo.contact_xy[q * geo.n + p])
+            continue
+        seas = [q for q in geo.wrap.get(p, []) if geo.ptype[q] == SEA]
+        if seas:
+            q = seas[0]
+            coast[p] = (q, geo.wrap_xy[p * geo.n + q], geo.wrap_xy[q * geo.n + p])
+            wrap_coast.append(p)
+    report["coastal_over_wrap"] = len(wrap_coast)
 
     # ---- buildings.txt
     lines = []
@@ -1873,7 +2031,10 @@ def write_map_text(out, src, geo, states, state_of, vps, van, report):
             q, (cx, cy), (sx, sy) = coast[p]
             lx, ly = geo.near(p, cx, cy)
             hx, hy = geo.near(q, sx, sy)
-            rot = math.atan2(sx - cx, -(sy - cy))
+            dx = sx - cx
+            if abs(dx) > geo.w / 2:  # the sea is across the wrap: point that way
+                dx -= math.copysign(geo.w, dx)
+            rot = math.atan2(dx, -(sy - cy))
             add(sid, "naval_base_spawn", lx, ly, rot, q)
             add(sid, "coastal_bunker", lx, ly, rot)
             add(sid, "naval_supply_hub", lx, ly, rot)
@@ -1895,6 +2056,8 @@ def write_map_text(out, src, geo, states, state_of, vps, van, report):
     nsea[:-1] |= seapx[1:]
     nsea[:, 1:] |= seapx[:, :-1]
     nsea[:, :-1] |= seapx[:, 1:]
+    nsea[:, 0] |= seapx[:, -1]  # the map's wrap
+    nsea[:, -1] |= seapx[:, 0]
     cy_, cx_ = np.nonzero(nsea & (geo.ptype[P] == LAND))
     cp = P[cy_, cx_]
     port_xy = {}
@@ -2974,6 +3137,37 @@ def check_mod(out):
     col = {(int(f[1]) << 16) | (int(f[2]) << 8) | int(f[3]): i for i, f in defs.items() if i}
     u, inv = np.unique(key, return_inverse=True)
     P = np.array([col.get(int(k), 0) for k in u.tolist()])[inv].reshape(key.shape)
+    # coastality as the game reads it off the bitmap -- **the map wraps**, so
+    # the last column counts against the first. The game prefers this over
+    # definition.csv ("Bitmap and province definition disagree ...") and
+    # crashes on start on a coastal province with no port building in the
+    # nudger. Land at the left / right edge (edge bands off) is the case.
+    bit_coast = set()
+    for A, B in ((P[:, :-1], P[:, 1:]), (P[:-1, :], P[1:, :]), (P[:, -1], P[:, 0])):
+        m = A != B
+        for x, y in set(zip(A[m].tolist(), B[m].tolist())):
+            if (x in land and y in sea) or (x in sea and y in land):
+                bit_coast |= {x, y}
+    bad = sorted(i for i in defs if i and (i in bit_coast) != (defs[i][5] == "true"))
+    if bad:
+        problems.append(f"{len(bad)} provinces whose definition.csv coastal flag "
+                        f"disagrees with the bitmap (wrap included): {bad[:10]}")
+    ports = set()  # the province each naval base stands in (x = X, row = h-1-Z)
+    for line in (out / "map/buildings.txt").read_text().splitlines():
+        f = line.split(";")
+        if len(f) >= 7 and f[1] == "naval_base_spawn":
+            try:
+                x, z = int(round(float(f[2]))), int(round(float(f[4])))
+            except ValueError:
+                continue
+            y = P.shape[0] - 1 - z
+            if 0 <= y < P.shape[0] and 0 <= x < P.shape[1]:
+                ports.add(int(P[y, x]))
+    noport = sorted((bit_coast & land) - ports)
+    if noport:
+        problems.append(f"{len(noport)} coastal land provinces with no port building "
+                        f'(game: "setup as coastal but has no port building in the '
+                        f'nudger. This will likely crash the game"): {noport[:10]}')
     nb = defaultdict(set)
     for A, B in ((P[:, :-1], P[:, 1:]), (P[:-1, :], P[1:, :])):
         m = A != B

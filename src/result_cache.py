@@ -35,6 +35,8 @@ ENABLED = os.environ.get("MAP_TOOL_NO_RESULT_CACHE", "") == ""
 # stages are covered by their content keys inside this stage's key)
 STAGE_CODE = {
     "render": ("core.py", "palettes.py"),
+    "recolor": ("core.py", "palettes.py"),   # the render's colours (memory only, see app._render_colored_from_args)
+    "eez_zones": ("eez.py", "states.py"),
     "eez_overlay": ("eez.py", "states.py"),
     "rivers": ("core.py",),
     "cities": ("cities.py", "city_names.py"),

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -36,6 +37,7 @@ import core
 import landcover
 import palettes
 import provinces
+import render_progress
 import result_cache
 import states
 import strategic
@@ -171,7 +173,7 @@ DOWNLOAD_RESOURCES = [
             {"label": "Cities",
              "url": "https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/geonames-all-cities-with-a-population-1000/exports/csv",
              "filename": "cities1000.csv",
-             "size_bytes": 34_844_703},
+             "size_bytes": 34_844_703, "head": False},
             # All GeoNames alternate names with their language (alternateNameId,
             # geonameid, isolanguage, name, isPreferredName, isShortName,
             # isColloquial, isHistoric, from, to); not extracted (~700 MB of
@@ -193,11 +195,11 @@ DOWNLOAD_RESOURCES = [
         "description": "World EEZ v12 (Flanders Marine Institute, CC BY 4.0): every country's 200 NM exclusive economic zone, overlapping claims and joint regimes, plus internal waters (behind baselines: fjords, bays) and archipelagic waters. Shapefiles, extracted after download. Shown on the Countries tab's map as a light tint of each country's colour over its sea.",
         "source_url": "https://www.marineregions.org/downloads.php",
         "files": [
-            {"label": "EEZ", "url": "https://geo.vliz.be/geoserver/MarineRegions/wfs?service=WFS&version=1.0.0&request=GetFeature&outputFormat=SHAPE-ZIP&typeName=MarineRegions:eez", "filename": "eez.zip", "size_bytes": 118_171_225},
+            {"label": "EEZ", "url": "https://geo.vliz.be/geoserver/MarineRegions/wfs?service=WFS&version=1.0.0&request=GetFeature&outputFormat=SHAPE-ZIP&typeName=MarineRegions:eez", "filename": "eez.zip", "size_bytes": 118_171_225, "head": False},
             {"label": "Internal waters", "url": "https://geo.vliz.be/geoserver/MarineRegions/wfs?service=WFS&version=1.0.0&request=GetFeature&outputFormat=SHAPE-ZIP&typeName=MarineRegions:eez_internal_waters",
-             "filename": "eez_internal_waters.zip", "size_bytes": 57_238_457},
+             "filename": "eez_internal_waters.zip", "size_bytes": 57_238_457, "head": False},
             {"label": "Archipelagic waters", "url": "https://geo.vliz.be/geoserver/MarineRegions/wfs?service=WFS&version=1.0.0&request=GetFeature&outputFormat=SHAPE-ZIP&typeName=MarineRegions:eez_archipelagic_waters",
-             "filename": "eez_archipelagic_waters.zip", "size_bytes": 29_249_379},
+             "filename": "eez_archipelagic_waters.zip", "size_bytes": 29_249_379, "head": False},
         ],
     },
     # JRC GHS-POP R2023A, epoch 2025, 30 arc-seconds (~1 km), EPSG:4326: people
@@ -337,6 +339,14 @@ def _filename_for(f: dict) -> str:
     return f.get("filename") or os.path.basename(urllib.parse.urlparse(f["url"]).path)
 
 
+def _ask_size(url: str) -> bool:
+    """Whether the server may be asked a file's size (HEAD): not for the
+    entries marked "head": False (exports streamed without a size; on the
+    EEZ's WFS a HEAD builds the export)."""
+    return not any(f["url"] == url and f.get("head", True) is False
+                   for r in DOWNLOAD_RESOURCES for f in r["files"])
+
+
 def _local_path(resource_id: str, filename: str):
     return DATA_DIR / resource_id / filename
 
@@ -356,17 +366,94 @@ def _extract_marker(dest):
     return dest.parent / f".{dest.name}.extracted"
 
 
-def _is_present(resource_id: str, filename: str) -> bool:
-    """Whether this file's data is already usable in the workspace, without
-    any network call. A downloaded .zip only counts once it has actually
-    been extracted (see `_extract_zip`) -- that's the point of extracting:
-    the tool should find its data already sitting there, ready to use."""
+def _complete_marker(dest):
+    """`.<name>.complete`, holding the size of a download checked whole
+    (_check_download): a file only counts as downloaded while its size is
+    still that one (users reported partial downloads shown as complete)."""
+    return dest.parent / f".{dest.name}.complete"
+
+
+def _mark_complete(dest):
+    _complete_marker(dest).write_text(str(dest.stat().st_size))
+
+
+class IncompleteDownload(RuntimeError):
+    """A downloaded file that isn't whole (cut short, damaged archive, ...)."""
+
+
+def _check_download(path, filename: str, expected):
+    """Raise if a downloaded file isn't whole: its size isn't the server's
+    (`expected`, None = unknown -- streamed exports have no Content-Length),
+    a zip can't be read through (every member's CRC), a text file is cut
+    mid-line."""
+    size = path.stat().st_size
+    if size == 0:
+        raise IncompleteDownload("incomplete download: the file is empty")
+    if expected and size != expected:
+        raise IncompleteDownload(f"incomplete download: {_mb(size)} of {_mb(expected)}" if _mb(size) != _mb(expected)
+                           else f"incomplete download: {size:,} of {expected:,} bytes")
+    low = filename.lower()
+    if low.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(path) as zf:
+                bad = zf.testzip()
+        except zipfile.BadZipFile as e:
+            raise IncompleteDownload(f"incomplete download: the archive is damaged ({e})")
+        if bad is not None:
+            raise IncompleteDownload(f"incomplete download: the archive is damaged ({bad})")
+    elif not expected and low.endswith((".csv", ".txt")):
+        with open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) != b"\n":
+                raise IncompleteDownload("incomplete download: the file ends mid-line")
+
+
+def _file_complete(resource_id: str, filename: str, url=None, network: bool = False) -> bool:
+    """Whether the downloaded file is whole: its .complete marker holds its
+    size; without a marker (an older version's download, a file copied by
+    hand) its size is compared with the server's -- from the size cache
+    only unless `network` -- and the marker written when they match; when
+    the server's size can't be known, a file that exists counts."""
+    dest = _local_path(resource_id, filename)
+    if not dest.exists() or dest.stat().st_size == 0:
+        return False
+    size = dest.stat().st_size
+    marker = _complete_marker(dest)
+    if marker.exists():
+        return marker.read_text().strip() == str(size)
+    if filename.lower().endswith((".zip", ".csv", ".txt")):
+        # checked by content: the server's file may have changed since
+        # (GeoNames regenerates its dumps daily -- a size compare flagged
+        # whole downloads)
+        try:
+            _check_download(dest, filename, None)
+        except Exception:
+            return False
+        _mark_complete(dest)
+        return True
+    if url is None:
+        return True
+    expected = _remote_size(url) if network else _size_cache.get(url)
+    if expected is None:
+        return True
+    if expected != size:
+        return False
+    _mark_complete(dest)
+    return True
+
+
+def _is_present(resource_id: str, filename: str, url=None, network: bool = False) -> bool:
+    """Whether this file's data is already usable in the workspace (network
+    only if `network`, see _file_complete). A downloaded .zip only counts
+    once it has actually been extracted (see `_extract_zip`) -- that's the
+    point of extracting: the tool should find its data already sitting
+    there, ready to use; any other file once it is whole (_file_complete)."""
     if resource_id == "landcover":  # also a manual download under another name; never a partial one
         return landcover.available()
     dest = _local_path(resource_id, filename)
     if _extracts(filename):
         return _extract_marker(dest).exists()
-    return dest.exists() and dest.stat().st_size > 0
+    return _file_complete(resource_id, filename, url, network)
 
 
 # ---- background download manager -----------------------------------------
@@ -406,6 +493,101 @@ def _extract_zip(dest, key: str):
     _extract_marker(dest).touch()
 
 
+# Slow links and interrupted connections (user): the bytes go to a `.part`
+# file that is **kept** when something goes wrong, and the next attempt asks
+# the server for the rest (HTTP `Range`) instead of starting the 5 GB again.
+# A dropped connection is retried on its own, waiting longer each time; the
+# timeout is per read, so a slow but steady download never trips it -- only a
+# stall does. A `.part` also survives closing the tool: the next download of
+# that file carries on where it stopped.
+DOWNLOAD_RETRIES = 8                                  # attempts after the first
+DOWNLOAD_BACKOFF_S = (2, 5, 10, 20, 30, 60, 60, 120)  # wait before each retry
+DOWNLOAD_TIMEOUT_S = 120                              # no data at all for this long = stalled
+SPEED_WINDOW_S = 1.0                                  # the speed shown is measured over this
+
+
+def _open_range(url, have):
+    """(response, resuming, total size or None) for `url`, asking for the
+    bytes after `have` when a part of the file is already there. `resuming`
+    False = the server ignored the Range (or there was nothing to resume):
+    the answer is the whole file."""
+    headers = {"User-Agent": "map-tool/1.0"}   # HydroSHEDS' Cloudflare rejects urllib's own
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    resp = urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                  timeout=DOWNLOAD_TIMEOUT_S, context=SSL_CONTEXT)
+    code = getattr(resp, "status", None) or resp.getcode()
+    resuming = bool(have) and code == 206
+    length = int(resp.headers.get("Content-Length") or 0) or None
+    total = None
+    if resuming:
+        # "Content-Range: bytes 500-999/1000" -> 1000
+        tail = (resp.headers.get("Content-Range") or "").rpartition("/")[2]
+        total = int(tail) if tail.isdigit() else (have + length if length else None)
+    elif length:
+        total = length
+    return resp, resuming, total
+
+
+def _fetch(key, url, tmp, filename):
+    """`url` into `tmp`, resuming and retrying an interrupted connection.
+    Returns the size downloaded; the file is checked whole before it counts."""
+    last = None
+    for attempt in range(DOWNLOAD_RETRIES + 1):
+        have = tmp.stat().st_size if tmp.exists() else 0
+        total = None
+        try:
+            resp, resuming, total = _open_range(url, have)
+            with resp:
+                if have and not resuming:
+                    _dl_log(f"{key}: the server will not resume, downloading it again from the start")
+                    have = 0
+                elif resuming:
+                    _dl_log(f"{key}: resuming at {_mb(have)}" + (f" of {_mb(total)}" if total else ""))
+                done = have
+                _set_state(key, status="downloading", bytes=done, total=total, error=None,
+                           attempt=attempt, speed=None, eta_s=None)
+                mark_t, mark_b, next_pct = time.time(), done, 25
+                with open(tmp, "ab" if resuming else "wb") as f:
+                    while True:
+                        chunk = resp.read(262144)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        done += len(chunk)
+                        now = time.time()
+                        if now - mark_t >= SPEED_WINDOW_S:
+                            speed = (done - mark_b) / (now - mark_t)
+                            _set_state(key, bytes=done, speed=round(speed),
+                                       eta_s=(round((total - done) / speed) if total and speed > 0 else None))
+                            mark_t, mark_b = now, done
+                        else:
+                            _set_state(key, bytes=done)
+                        if total and next_pct < 100 and done * 100 >= next_pct * total:
+                            _dl_log(f"{key}: {next_pct}% ({_mb(done)} / {_mb(total)})")
+                            next_pct += 25
+            _check_download(tmp, filename, total)
+            return done
+        except Exception as e:
+            last = e
+            size_now = tmp.stat().st_size if tmp.exists() else 0
+            # a file that is merely cut short resumes; one that is damaged (or
+            # a range the server refuses) has to be downloaded again
+            refused = isinstance(e, urllib.error.HTTPError) and e.code == 416
+            if refused or (isinstance(e, IncompleteDownload) and not (total and size_now < total)):
+                tmp.unlink(missing_ok=True)
+                size_now = 0
+            if attempt >= DOWNLOAD_RETRIES:
+                break
+            wait = DOWNLOAD_BACKOFF_S[min(attempt, len(DOWNLOAD_BACKOFF_S) - 1)]
+            _dl_log(f"{key}: {e} -- {_mb(size_now)} so far; trying again in {wait} s "
+                    f"(attempt {attempt + 2} of {DOWNLOAD_RETRIES + 1})")
+            _set_state(key, status="retrying", bytes=size_now, error=str(e), retry_in=wait,
+                       attempt=attempt + 1, speed=None, eta_s=None)
+            time.sleep(wait)
+    raise last
+
+
 def _download_worker(resource_id: str, filename: str, url: str):
     key = f"{resource_id}/{filename}"
     dest = _local_path(resource_id, filename)
@@ -413,46 +595,38 @@ def _download_worker(resource_id: str, filename: str, url: str):
     tmp = dest.with_name(dest.name + ".part")
     t0 = time.time()
     try:
-        # The download is written to .part and renamed only once complete, so
-        # an existing file is whole (e.g. a zip downloaded but not extracted).
-        # No HEAD to compare sizes: on the EEZ's WFS a HEAD builds the export.
-        if dest.exists() and dest.stat().st_size > 0:
+        # The download is written to .part, checked whole (size, archive,
+        # last line) and only then renamed + marked complete. An existing
+        # file (e.g. a zip downloaded but not extracted) is used only if it
+        # is whole (_file_complete; no HEAD for entries listing their size:
+        # on the EEZ's WFS a HEAD builds the export) -- else fetched again.
+        existing = dest.exists() and dest.stat().st_size > 0
+        if existing and not _file_complete(resource_id, filename, url if _ask_size(url) else None, network=True):
+            _dl_log(f"{key}: the file there is not whole, downloading it again")
+            existing = False
+        if existing:
             downloaded = dest.stat().st_size
             _set_state(key, status="downloading", bytes=downloaded, total=downloaded, error=None)
             _dl_log(f"{key}: already downloaded ({_mb(downloaded)}), using it")
         else:
             _set_state(key, status="downloading", bytes=0, total=None, error=None)
             _dl_log(f"{key}: downloading from {urllib.parse.urlparse(url).netloc} ...")
-            req = urllib.request.Request(url, headers={"User-Agent": "map-tool/1.0"})
-            with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as resp:
-                total = int(resp.headers.get("Content-Length") or 0) or None
-                _set_state(key, total=total)
-                downloaded = 0
-                next_pct = 25
-                with open(tmp, "wb") as f:
-                    while True:
-                        chunk = resp.read(262144)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        _set_state(key, bytes=downloaded)
-                        if total and next_pct < 100 and downloaded * 100 >= next_pct * total:
-                            _dl_log(f"{key}: {next_pct}% ({_mb(downloaded)} / {_mb(total)})")
-                            next_pct += 25
+            downloaded = _fetch(key, url, tmp, filename)
             os.replace(tmp, dest)
+            _mark_complete(dest)
             _dl_log(f"{key}: downloaded {_mb(downloaded)} in {time.time() - t0:.0f} s")
 
         if _extracts(filename):
             _dl_log(f"{key}: extracting ...")
             _extract_zip(dest, key)
 
-        _set_state(key, status="done", bytes=downloaded, total=downloaded)
+        _set_state(key, status="done", bytes=downloaded, total=downloaded, speed=None, eta_s=None)
         _dl_log(f"{key}: done")
     except Exception as e:
-        tmp.unlink(missing_ok=True)
-        _set_state(key, status="error", error=str(e))
-        _dl_log(f"{key}: FAILED -- {e}")
+        # the .part is kept on purpose: Retry (or the next start) resumes it
+        kept = tmp.stat().st_size if tmp.exists() else 0
+        _set_state(key, status="error", error=str(e), bytes=kept, speed=None, eta_s=None)
+        _dl_log(f"{key}: FAILED -- {e}" + (f" ({_mb(kept)} kept, Retry carries on from there)" if kept else ""))
     finally:
         with _dl_lock:
             _dl_queued.discard(key)
@@ -468,7 +642,7 @@ def _mb(n: int) -> str:
 
 def _queue_download(resource_id: str, filename: str, url: str):
     key = f"{resource_id}/{filename}"
-    if _is_present(resource_id, filename):
+    if _is_present(resource_id, filename, url if _ask_size(url) else None, network=True):
         size = _local_size(resource_id, filename)
         _set_state(key, status="done", bytes=size or 0, total=size)
         _dl_log(f"{key}: already present, skipped")
@@ -494,8 +668,14 @@ def index():
 def api_downloads():
     # Files with a listed size aren't asked (a WFS export would be built
     # just to answer a HEAD).
-    all_urls = [f["url"] for r in DOWNLOAD_RESOURCES for f in r["files"] if not f.get("size_bytes")]
-    with ThreadPoolExecutor(max_workers=min(16, len(all_urls))) as ex:
+    # Files with a listed size are asked only when one is on disk without a
+    # .complete marker (to check it is whole): the flags / climate hosts
+    # answer a HEAD quickly; the cities / EEZ exports aren't checked by size.
+    all_urls = [f["url"] for r in DOWNLOAD_RESOURCES for f in r["files"]
+                if not f.get("size_bytes")
+                or (_ask_size(f["url"]) and _local_path(r["id"], _filename_for(f)).exists()
+                    and not _complete_marker(_local_path(r["id"], _filename_for(f))).exists())]
+    with ThreadPoolExecutor(max_workers=max(1, min(16, len(all_urls)))) as ex:
         sizes = dict(zip(all_urls, ex.map(_remote_size, all_urls)))
 
     result = []
@@ -505,7 +685,7 @@ def api_downloads():
             filename = _filename_for(f)
             size = sizes.get(f["url"]) or f.get("size_bytes")
             key = f'{r["id"]}/{filename}'
-            downloaded = _is_present(r["id"], filename)
+            downloaded = _is_present(r["id"], filename, f["url"] if _ask_size(f["url"]) else None)
             state = _get_state(key)
             if state["status"] == "done" and not downloaded:
                 # Downloaded earlier in this session, then moved / deleted.
@@ -629,6 +809,14 @@ def api_version():
                     "changed_files": changed, "background": _background_jobs()})
 
 
+@app.get("/api/progress")
+def api_progress():
+    """What a tab is computing right now, for the bar at the top of the page:
+    {active, label, note, step, progress 0-1, eta_s} (active false = nothing
+    running, or everything came from the cache). See render_progress.py."""
+    return jsonify(render_progress.snapshot())
+
+
 @app.post("/api/restart")
 def api_restart():
     """Starts a fresh server (it waits for the port, see __main__) and stops
@@ -687,7 +875,8 @@ def api_subdivisions():
     try:
         if tag not in core.load_geometries():
             return jsonify({"error": f"Unknown country '{tag}'"}), 400
-        return jsonify({"tag": tag, "subdivisions": core.list_subdivisions(tag)})
+        level = max(1, min(core.MAX_SUBDIV_LEVEL, int(request.args.get("level") or 1)))
+        return jsonify({"tag": tag, "level": level, "subdivisions": core.list_subdivisions(tag, level)})
     except core.DataNotFoundError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -695,7 +884,8 @@ def api_subdivisions():
 @app.get("/api/subdivisions/search")
 def api_subdivisions_search():
     """Subdivisions of every country matching ?q= (name, alternative names, country)."""
-    return jsonify({"results": core.search_subdivisions(request.args.get("q", ""))})
+    level = max(1, min(core.MAX_SUBDIV_LEVEL, int(request.args.get("level") or 1)))
+    return jsonify({"level": level, "results": core.search_subdivisions(request.args.get("q", ""), level=level)})
 
 
 @app.get("/api/projections")
@@ -713,12 +903,25 @@ def _parse_list(param):
     return [t for t in raw.split(",") if t]
 
 
+def _parse_crop(param):
+    """"left,right,top,bottom" (pixels off each border) -> the dict
+    core.normalize_crop takes; "" / absent = no crop."""
+    raw = request.args.get(param, "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != len(core.CROP_SIDES):
+        raise core.RenderError(f"The crop takes {len(core.CROP_SIDES)} values "
+                               f"({', '.join(core.CROP_SIDES)}), got '{raw}'")
+    return core.normalize_crop(parts)
+
+
 # The UI fetches a view's meta, then its image (and the Land/Sea tab its
 # preview) as separate requests; caching the last few renders means one
 # render per view instead of one per request. Keyed on the render params +
 # the saved Land/Sea settings, so saving new settings re-renders.
-_RENDER_PARAMS = ("tags", "projection", "margin", "excluded", "size", "mainland", "merge", "world", "center",
-                  "antarctica", "edges", "edge_px", "subx", "subi")
+_RENDER_PARAMS = ("tags", "projection", "margin", "excluded", "removed", "size", "mainland", "merge", "world",
+                  "center", "antarctica", "edges", "edge_px", "subx", "subi", "sea", "crop")
 _RENDER_CACHE_SIZE = 3
 _render_cache = OrderedDict()
 _render_lock = threading.Lock()
@@ -773,13 +976,15 @@ def _data_sig(*dirs):
 
 def _stage_get(mem, size, stage, k, compute):
     """A stage's result: memory (LRU of `size`) -> disk -> compute() (then
-    saved). Call with _render_lock held."""
+    saved). Call with _render_lock held. A computation (not a cache hit, which
+    is instant) is what the progress bar at the top of the page shows."""
     if k in mem:
         mem.move_to_end(k)
         return mem[k]
     entry = result_cache.load(stage, k)
     if entry is None:
-        entry = compute()
+        with render_progress.scope(stage):
+            entry = compute()
         result_cache.save(stage, k, entry)
     mem[k] = entry
     while len(mem) > size:
@@ -796,17 +1001,56 @@ def _int_arg(name, default):
 
 def _render_detailed_from_args():
     """(image, meta, land/sea debug) for the view described by the request's
-    query params (shared by the render, rivers and Land/Sea endpoints)."""
-    land_sea = core.load_land_sea_settings()
+    query params (shared by the render, rivers and Land/Sea endpoints), in
+    the active colour configuration: the render in fixed colours
+    (_render_base_from_args, cached without the colours) recoloured --
+    a colour change only redoes the recolouring (core.recolor_render)."""
+    return _render_colored_from_args()[:3]
+
+
+def _render_colored_from_args():
+    """_render_detailed_from_args + the {fixed colour: configured colour}
+    pairs (to recolour other images made from the fixed-colour render)."""
+    base = _render_base_from_args()
     color_config = palettes.load_config()
-    k = result_cache.key("render", [request.args.get(p, "") for p in _RENDER_PARAMS], land_sea, color_config,
-                         _data_sig("gadm", "hydrosheds"))
+    kc = result_cache.key("recolor", _ck(base[0]), color_config)
     with _render_lock:
-        result = _stage_get(_render_cache, _RENDER_CACHE_SIZE, "render", k, lambda: core.render_map_detailed(
+        if kc in _recolor_cache:
+            _recolor_cache.move_to_end(kc)
+        else:
+            _recolor_cache[kc] = core.recolor_render(*base, color_config)
+            while len(_recolor_cache) > _RENDER_CACHE_SIZE:
+                _recolor_cache.popitem(last=False)
+        entry = _recolor_cache[kc]
+        _stamp(entry[0], kc)
+        entry[0]._fixed = (base[0], base[2])  # its fixed-colour version (EEZ zones are made on it)
+        return entry
+
+
+# recoloured renders / fitted country maps: memory only (recolouring takes
+# well under a second)
+_recolor_cache = OrderedDict()
+_fitted_recolor_cache = OrderedDict()
+
+
+def _render_base_from_args():
+    """The request's render in fixed colours (core.render_map_detailed with
+    color_config=False): the expensive part, cached without the colour settings."""
+    land_sea = core.load_land_sea_settings()
+    big = request.args.get("big", "0") in ("1", "true")
+    # "big" (double size) only enters the key when on: normal-size renders keep their cached results
+    k = result_cache.key("render", [request.args.get(p, "") for p in _RENDER_PARAMS] + (["big"] if big else []),
+                         land_sea, _data_sig("gadm", "hydrosheds", "topography"))
+    color_config = False
+
+    def _compute():
+        res = core.render_map_detailed(
             _parse_list("tags"),
             request.args.get("projection", "miller"),
             margin_percent=float(request.args.get("margin", core.DEFAULT_MARGIN_PERCENT)),
             excluded_tags=_parse_list("excluded"),
+            removed_tags=_parse_list("removed"),
+            crop=_parse_crop("crop"),
             output_size=core.parse_output_size(request.args.get("size", "auto")),
             ignore_overseas=request.args.get("mainland", "0") in ("1", "true"),
             land_sea=land_sea,
@@ -819,7 +1063,17 @@ def _render_detailed_from_args():
             edge_band_px=_int_arg("edge_px", core.EDGE_BAND_PX_DEFAULT),
             excluded_subdivisions=_parse_list("subx"),
             included_subdivisions=_parse_list("subi"),
-        ))
+            double_size=big,
+            sea_level_m=_int_arg("sea", 0),
+            progress=render_progress.note,
+        )
+        # the estimates (and so the ETA) scale with the view's size
+        render_progress.set_view_pixels(res[1]["width"] * res[1]["height"])
+        return res
+
+    with _render_lock:
+        result = _stage_get(_render_cache, _RENDER_CACHE_SIZE, "render", k, _compute)
+        render_progress.set_view_pixels(result[1]["width"] * result[1]["height"])
         _stamp(result[0], k)
         return result
 
@@ -865,18 +1119,28 @@ def _eez_overlay(img, debug):
         raise core.RenderError("The EEZ opacity must be a number")
     if not 0.0 < opacity <= 1.0:
         raise core.RenderError("The EEZ opacity must be above 0 and at most 1")
-    excluded = tuple(sorted(_parse_list("excluded")))
+    excluded = tuple(sorted(set(_parse_list("excluded")) | set(_parse_list("removed"))))
     min_region = core.load_land_sea_settings().get("min_region_px", 8)
-    k = result_cache.key("eez_overlay", _ck(img), round(opacity, 3), excluded, min_region, _data_sig("eez"))
-
-    def compute():
-        out, rep = eez.overlay(img, debug, excluded, opacity, min_region)
-        rep["available"] = True
-        return out, rep
+    # the zones on the fixed-colour version of the map (cached: the slow
+    # part), the tint in the configured colours (post-processing)
+    fimg, fdebug = getattr(img, "_fixed", (img, debug))
+    kz = result_cache.key("eez_zones", _ck(fimg), excluded, min_region, _data_sig("eez"))
     with _render_lock:
-        entry = _stage_get(_eez_cache, 4, "eez_overlay", k, compute)
+        lab, tags, rep = _stage_get(_eez_cache, 4, "eez_zones", kz, lambda: eez.zones(fimg, fdebug, excluded, min_region))
+    k = result_cache.key("eez_overlay", kz, _ck(img), round(opacity, 3))
+    with _render_lock:
+        if k in _eez_tint_cache:
+            _eez_tint_cache.move_to_end(k)
+        else:
+            _eez_tint_cache[k] = (eez.tint(img, lab, tags, debug["country_rgb"], opacity), dict(rep, available=True))
+            while len(_eez_tint_cache) > 4:
+                _eez_tint_cache.popitem(last=False)
+        entry = _eez_tint_cache[k]
         _stamp(entry[0], k)
         return entry
+
+
+_eez_tint_cache = OrderedDict()
 
 
 @app.get("/api/render/image")
@@ -981,6 +1245,9 @@ def api_landsea_settings():
         "colors": {k: core.rgb_to_hex(v) for k, v in core.PREVIEW_COLORS.items()},
         "mask_colors": {k: core.rgb_to_hex(v) for k, v in core.MASK_COLORS.items()},
         "lakes_available": core.LAKES_SHAPEFILE_PATH.exists(),
+        # fetched once at start-up, so it is also what tells the Countries
+        # tab's sea level control whether the topography is downloaded
+        "topography_available": core.topography_available(),
     })
 
 
@@ -1082,19 +1349,36 @@ def _rivers_from_args():
     flags = {name: request.args.get(param, "1") not in ("0", "false")
              for name, param in (("through_lakes", "lakes"), ("reach_sea", "sea"), ("drop_dead_ends", "deadends"),
                                  ("fit_borders", "borders"))}
-    img, meta, debug = _render_detailed_from_args()
-    k = result_cache.key("rivers", _ck(img), sorted(pct.items()), min_len, spacing, sorted(flags.items()),
+    # made from the fixed-colour render (colours only tell the countries
+    # apart there), so a colour change doesn't redraw the rivers; the fitted
+    # country map is recoloured like the render
+    img, meta, _debug, pairs = _render_colored_from_args()
+    bimg, _bmeta, bdebug = _render_base_from_args()
+    k = result_cache.key("rivers", _ck(bimg), sorted(pct.items()), min_len, spacing, sorted(flags.items()),
                          _data_sig("hydrosheds", "river_borders.json"))
 
     def compute():
-        rivers, report = core.render_rivers(img, debug, pct, min_len, spacing, **flags)
+        rivers, report = core.render_rivers(bimg, bdebug, pct, min_len, spacing, **flags)
         countries = report.pop("countries_image", None)
-        return rivers, report, (None if countries is img else countries)
+        return rivers, report, (None if countries is bimg else countries)
     with _render_lock:
         rivers, report, countries = _stage_get(_river_cache, 2, "rivers", k, compute)
         _stamp(rivers, k + ":rivers")
+    if countries is None:
+        return rivers, report, meta, img
+    kc = result_cache.key("recolor", k + ":countries", _ck(img))
+    with _render_lock:
+        if kc in _fitted_recolor_cache:
+            _fitted_recolor_cache.move_to_end(kc)
+        else:
+            _fitted_recolor_cache[kc] = core.recolor_image(countries, pairs)
+            while len(_fitted_recolor_cache) > 2:
+                _fitted_recolor_cache.popitem(last=False)
+        fitted = _fitted_recolor_cache[kc]
+        _stamp(fitted, kc)
         _stamp(countries, k + ":countries")
-        return rivers, report, meta, (countries if countries is not None else img)
+        fitted._fixed = (countries, bdebug)
+    return rivers, report, meta, fitted
 
 
 @app.get("/api/rivers/settings")
@@ -1473,7 +1757,7 @@ def _province_eez(countries, debug):
     """EEZ zone labels on the (fitted) country map for the sea provinces, or None."""
     if not eez.available():
         return None
-    excluded = tuple(sorted(_parse_list("excluded")))
+    excluded = tuple(sorted(set(_parse_list("excluded")) | set(_parse_list("removed"))))
     min_region = core.load_land_sea_settings().get("min_region_px", 8)
     k = result_cache.key("province_eez", _ck(countries), excluded, min_region, _data_sig("eez"))
 
@@ -1604,12 +1888,14 @@ def _strategic_from_args():
     except ValueError as e:
         raise core.RenderError(str(e))
     pimg, _report, definition, _meta, states_csv, _extras, _rivers = _provinces_from_args(full=True)
-    view = _render_detailed_from_args()[2]["view"]  # the frame, for the climate (weather)
+    rdebug = _render_detailed_from_args()[2]
+    view = rdebug["view"]  # the frame, for the climate (weather)
+    drowned_depth = core.drowned_depth_m(rdebug)  # sea level rise: GEBCO has no soundings there
     k = result_cache.key("strategic", _ck(pimg), settings, _data_sig("climate", "bathymetry"))
 
     def compute():
         regions, report, prov_region, P = strategic.build_regions(pimg, definition, states_csv, settings,
-                                                                  view=view)
+                                                                  view=view, drowned_depth=drowned_depth)
         ptype = strategic.parse_inputs(pimg, definition, None)[1]
         return regions, report, prov_region, P, ptype
     with _render_lock:
@@ -1627,7 +1913,7 @@ def api_cache():
 def api_cache_clear():
     """Deletes every cached result on disk and in memory."""
     with _render_lock:
-        for c in (_render_cache, _eez_cache, _river_cache, _city_cache, _height_cache, _height_levels_cache,
+        for c in (_render_cache, _recolor_cache, _fitted_recolor_cache, _eez_cache, _eez_tint_cache, _river_cache, _city_cache, _height_cache, _height_levels_cache,
                   _state_cache, _province_cache, _prov_aux_cache, _strategic_cache, _terrain_cache, _colormap_cache):
             c.clear()
     return jsonify({"deleted": result_cache.clear()})
@@ -1941,7 +2227,8 @@ def _hoi4_sources():
     if cities.available():
         _ci, crep, _cm = _cities_from_args()
         city_list = crep["cities"]
-    return {"meta": meta, "view": debug["view"], "rivers": rivers, "heightmap": hoi4h, "normal": normal,
+    return {"meta": meta, "view": debug["view"], "drowned_depth": core.drowned_depth_m(debug),
+            "rivers": rivers, "heightmap": hoi4h, "normal": normal,
             "terrain": timg, "trees": trep["trees_image"], "colormap": cm, "provinces_img": pimg,
             "definition": definition, "states_csv": states_csv, "states": srep["states"], "regions": regions,
             "cities": city_list, "thumbnail": countries}

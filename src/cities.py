@@ -729,15 +729,23 @@ def render_cities(image: Image.Image, debug, settings=None):
     cand = np.flatnonzero((ix >= 0) & (ix < w) & (iy >= 0) & (iy < h) & (idx["population"] >= s["min_population"]))
     ix, iy = ix[cand], iy[cand]
     # On a visible country's land, or moved onto it from up to SNAP_PX away.
+    # A city on land a sea level rise drowned is dropped instead: its people
+    # are lost (states.py), and the snap would otherwise put it -- and its
+    # victory point -- back ashore a few pixels inland.
     on = visible[iy, ix]
+    drowned = debug.get("drowned")
     snapped = 0
     if (~on).any() and visible.any():
         dist, (ny, nx) = ndimage.distance_transform_edt(~visible, return_indices=True)
         off = np.flatnonzero(~on)
+        if drowned is not None:
+            off = off[~drowned[iy[off], ix[off]]]
         near = off[dist[iy[off], ix[off]] <= SNAP_PX]
         iy[near], ix[near] = ny[iy[near], ix[near]], nx[iy[near], ix[near]]
         on[near] = True
         snapped = int(len(near))
+    if drowned is not None:
+        report["drowned"] = int(drowned[iy, ix].sum())
     cand, ix, iy = cand[on], ix[on], iy[on]
     report["in_view"], report["snapped"] = int(len(cand)), snapped
 

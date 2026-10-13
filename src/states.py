@@ -316,12 +316,13 @@ def _common_prefix(a: tuple, b: tuple) -> tuple:
     return a[:n]
 
 
-def _state_populations(state, n_labels: int, view):
+def _state_populations(state, n_labels: int, view, drowned=None):
     """Population per state label: GeoNames places (>= 1,000 people, each
     place's own figure -- a city's districts aren't counted twice) inside
     it; a place just off the state pixels (coast) goes to the nearest state
     within POP_SNAP_PX. None without the city dataset. Rural people outside
-    such places aren't counted."""
+    such places aren't counted. A place on land a sea level rise drowned is
+    left out instead of snapped ashore -- its people are lost."""
     try:
         import cities
         if not cities.available():
@@ -341,18 +342,29 @@ def _state_populations(state, n_labels: int, view):
     if off.any() and (state > 0).any():
         dist, (ny, nx) = ndimage.distance_transform_edt(state == 0, return_indices=True)
         near = off & (dist[iy, ix] <= POP_SNAP_PX)
+        if drowned is not None:
+            near &= ~drowned[iy, ix]
         lab[near] = state[ny[iy[near], ix[near]], nx[iy[near], ix[near]]]
     return np.bincount(lab, weights=pop, minlength=n_labels)
 
 
-def _populations(state, states, counts, view):
+def _populations(state, states, counts, view, lab=None, drowned=None, density_img=None):
     """(population per label or None, report). GHS-POP per GADM unit when
     downloaded (population.py: 4.1 table matched to 3.6, gaps split from
     the parent) -- a unit cut by the frame gets its visible share
     (pixels / full projected area, when under CLIP_SHARE) -- else, and for
-    units it can't place, the GeoNames places inside the state."""
+    units it can't place, the GeoNames places inside the state.
+
+    With a sea level rise (`drowned`), the people on the drowned land are
+    simply lost (user): each unit keeps the share of its population still
+    above water. `lab` is the GADM units rasterized over the whole frame --
+    it is drawn from the geometry, not from the country map, so it still
+    names the unit under every drowned pixel. The share is weighted by
+    `density_img` (GHS-POP people / km2 per pixel) when that is available,
+    so drowning a coast costs its cities and not just its area; without it,
+    by pixels."""
     import population
-    geo = _state_populations(state, len(states), view)
+    geo = _state_populations(state, len(states), view, drowned)
     rep = {"source": None, "table": 0, "split": 0, "places": 0, "clipped": 0}
     if not population.available():
         rep["source"] = "GeoNames places >= 1,000 people (download GHS-POP for full figures)" if geo is not None else None
@@ -362,10 +374,15 @@ def _populations(state, states, counts, view):
     # elsewhere (erased islets, lakes) keeps its full population.
     land = state > 0
     h, w = state.shape
+    # Drowned pixels still belong to their unit: they count for the frame
+    # test and for the edge-clip share (the rise is taken out separately,
+    # below), so a rise can't be charged twice to the same unit.
+    sunk = (drowned & (lab > 0)) if (drowned is not None and lab is not None and drowned.any()) else None
+    foot = land if sunk is None else (land | sunk)
     at_edge = np.zeros(len(states), dtype=bool)
     edge_zone = np.zeros((h, w), dtype=bool)
     for axis_rev, sl in ((False, 0), (True, 0), (False, 1), (True, 1)):
-        m = land if sl == 0 else land.T
+        m = foot if sl == 0 else foot.T
         m = m[::-1] if axis_rev else m
         rows = np.flatnonzero(m.any(axis=1))
         k = (int(rows[0]) if len(rows) else 0) + 3
@@ -375,10 +392,32 @@ def _populations(state, states, counts, view):
         edge_zone |= z if sl == 0 else z.T
     at_edge[np.unique(state[edge_zone & land])] = True
     rep["frame_units"] = int(at_edge[1:].sum())
+    # Share of each unit's population left above water, and the pixels it
+    # had before the rise (for the edge-clip share).
+    keep = None
+    sunk_px = np.zeros(len(states), dtype=np.int64)
+    if sunk is not None:
+        wgt = (np.asarray(density_img, dtype=np.float64) if density_img is not None
+               else np.ones(state.shape, dtype=np.float64))
+        gone = np.bincount(lab[sunk], weights=wgt[sunk], minlength=len(states))
+        left = np.bincount(state.ravel(), weights=wgt.ravel(), minlength=len(states))
+        total = left + gone
+        keep = np.where(total > 0, left / np.maximum(total, 1e-12), 1.0)
+        keep[0] = 1.0
+        sunk_px = np.bincount(lab[sunk], minlength=len(states))
+        rep["drowned_units"] = int((gone[1:] > 0).sum())
+        rep["drowned_weighting"] = "GHS-POP density" if density_img is not None else "area"
+        rep["drowned_population"] = 0.0
     pops = np.zeros(len(states))
     for k in range(1, len(states)):
         st = states[k]
         if counts[k] == 0:
+            # A unit the rise drowned whole leaves no state at all: all of
+            # its people are lost, so they still belong in the tally.
+            if keep is not None and sunk_px[k] > 0:
+                p0 = population.population_of(st["level"], st["tag"], st["gid"])[0]
+                rep["drowned_population"] += float(p0 or 0.0)
+                rep["drowned_units_whole"] = rep.get("drowned_units_whole", 0) + 1
             continue
         p, src = population.population_of(st["level"], st["tag"], st["gid"])
         if p is None:
@@ -386,12 +425,18 @@ def _populations(state, states, counts, view):
             rep["places"] += 1
             continue
         full = st.get("full_px") or 0.0
-        if at_edge[k] and full > 0 and counts[k] < CLIP_SHARE * full:
-            p *= counts[k] / full
+        seen = counts[k] + int(sunk_px[k])  # the unit's pixels before the rise
+        if at_edge[k] and full > 0 and seen < CLIP_SHARE * full:
+            p *= seen / full
             rep["clipped"] += 1
+        if keep is not None:
+            rep["drowned_population"] += p * (1.0 - keep[k])
+            p *= keep[k]
         pops[k] = p
         rep[src if src in ("table", "split") else "places"] += 1
     rep["source"] = population.SOURCE
+    if keep is not None:
+        rep["drowned_population"] = int(round(rep["drowned_population"]))
     return pops, rep
 
 
@@ -842,7 +887,8 @@ def render_states(countries: Image.Image, debug, rivers: Image.Image | None = No
 
     # Small states merged into a neighbour.
     counts0 = np.bincount(state.ravel(), minlength=len(states))
-    pops, report["population"] = _populations(state, states, counts0, view)
+    pops, report["population"] = _populations(state, states, counts0, view, lab=lab,
+                                              drowned=debug.get("drowned"), density_img=density_img)
     report["states_before_merge"] = int((counts0[1:] > 0).sum())
     # per-state merge size: x its density factor x its country's factor
     thr = np.full(len(states), float(s["merge_px"]))

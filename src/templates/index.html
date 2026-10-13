@@ -83,6 +83,25 @@
   .bg-banner .bg-bar { width: 140px; height: 6px; background: rgba(255,255,255,0.15); border-radius: 3px; overflow: hidden; flex: none; }
   .bg-banner .bg-bar > div { height: 100%; background: #e0b84a; }
   .bg-banner .hint { opacity: 0.8; }
+  /* What a tab is computing now: the bar at the top of every tab. */
+  .render-bar {
+    display: none;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 24px;
+    background: #15314a;
+    border-bottom: 1px solid var(--accent);
+    font-size: 13px;
+  }
+  .render-bar .rb-track { flex: 1; height: 8px; background: rgba(255,255,255,0.14); border-radius: 4px; overflow: hidden; }
+  .render-bar .rb-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s linear; }
+  .render-bar .rb-fill.indeterminate { width: 35%; animation: rb-slide 1.2s ease-in-out infinite alternate; }
+  @keyframes rb-slide { from { margin-left: 0; } to { margin-left: 65%; } }
+  .render-bar .rb-eta { flex: none; opacity: 0.85; font-variant-numeric: tabular-nums; }
+  .render-bar .rb-note { flex: none; opacity: 0.6; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tabs {
     display: flex;
     gap: 2px;
@@ -281,7 +300,8 @@
     padding: 4px 0;
     font-size: 13px;
   }
-  .legend-item.hidden-item { opacity: 0.6; }
+  .legend-item.hidden-item, .legend-item.removed-item { opacity: 0.6; }
+  .legend-item .btns { display: flex; gap: 4px; flex: none; }
   .swatch {
     width: 14px;
     height: 14px;
@@ -503,6 +523,7 @@
     background: var(--accent);
     transition: width 0.25s ease;
   }
+  .progress-fill.stalled { background: #e0b84a; }   /* the connection dropped: waiting to resume */
   .dl-progress-text { font-size: 10px; color: var(--muted); white-space: nowrap; }
   .dl-done { font-size: 12px; color: #4fb87a; font-weight: 600; white-space: nowrap; }
   .dl-error-text { font-size: 10.5px; color: #ff6b6b; }
@@ -530,7 +551,7 @@
     <button id="loadParams" class="refresh-btn" title="Restore every setting from a parameters file">Load parameters</button>
     <input type="file" id="loadParamsFile" accept=".json,application/json" style="display:none">
     <button id="refreshApp" class="refresh-btn" title="Restart EarthToHoI4 with its current code and reload this page">Refresh</button>
-    <button id="closeApp" class="close-btn" title="Stop the EarthToHoI4 server">Close</button>
+    <button id="closeApp" class="close-btn" title="Stop the EarthToHoI4 server and close the tool">Stop server</button>
   </div>
 </header>
 
@@ -737,6 +758,22 @@
       <div id="subdivSection"><div class="hint">Select a country to list its subdivisions.</div></div>
       <div class="hint">Untick a selected country's states / provinces to leave them out: the view is framed on the ticked ones only, and parts of the country lying entirely in unticked ones (islands, exclaves: Hawaii, Corsica) are left out of the map (sea, on every tab). Overrides "Ignore overseas territories" for that country &mdash; e.g. the USA with Alaska but without Hawaii. Subdivisions joined to the rest by land can be left out of the framing, not of the drawing (GADM draws the country as one shape). The search also filters these lists, and lists matching subdivisions of other countries: <b>Add</b> one to frame it with your selection (e.g. Finland + Karelia) &mdash; its country is drawn as any neighbour.</div>
 
+      <label>Subdivisions (GADM level 2)</label>
+      <input type="text" id="subdiv2Search" placeholder="Search counties / districts (any country)...">
+      <div id="subdiv2Results"></div>
+      <div class="chips" id="included2Chips"></div>
+      <div id="subdiv2Section"><div class="hint">Select a country to list its subdivisions.</div></div>
+      <div class="hint">The same thing one level finer &mdash; counties, districts, council areas &mdash; for the
+        parts a level-1 region does not isolate: untick <b>Shetland Islands</b> (Scotland) or <b>Isles of
+        Scilly</b> (England) to drop them from a map of the British Isles. The two levels work together: an
+        unticked level-1 region takes all of its level-2 units with it, and the finer list is only read when you
+        use it. Same rule as above &mdash; only land that GADM draws as its own shape (islands, exclaves) can be
+        left out of the <i>drawing</i>; anything joined to the rest by land can only be left out of the framing.
+        <b>The Channel Islands are not British subdivisions</b>: Jersey and Guernsey are GADM countries of their
+        own with no level 2 at all. While "Autonomous territories" below is ticked they are drawn as part of the
+        UK, and the <i>level-1</i> list above then carries a block for each of them &mdash; untick all of a
+        block's parishes and that island goes.</div>
+
       <label for="projection">Projection</label>
       <select id="projection"></select>
 
@@ -749,6 +786,43 @@
       </select>
       <div class="hint">Auto picks the resolution whose aspect ratio best matches the selection. A manual size keeps the whole selection visible and adds extra surrounding area on the looser axis.</div>
 
+      <label>Crop borders</label>
+      <div class="radio-row">
+        <input type="checkbox" id="cropOn">
+        <label for="cropOn" class="inline-label">Cut a fixed band off the borders</label>
+      </div>
+      <div class="ls-form" id="cropFields" style="grid-template-columns:auto 1fr auto 1fr;margin-top:4px;align-items:center;display:none">
+        <label for="cropLeft" style="margin:0">Left</label>
+        <input type="number" id="cropLeft" value="0" min="0" step="1">
+        <label for="cropRight" style="margin:0">Right</label>
+        <input type="number" id="cropRight" value="0" min="0" step="1">
+        <label for="cropTop" style="margin:0">Top</label>
+        <input type="number" id="cropTop" value="0" min="0" step="1">
+        <label for="cropBottom" style="margin:0">Bottom</label>
+        <input type="number" id="cropBottom" value="0" min="0" step="1">
+      </div>
+      <div class="hint" id="cropNote" style="display:none"></div>
+      <div class="hint">Cuts bands of pixels off the chosen borders, on top of whatever the size above gives
+        &mdash; one border or several, 0 to leave one alone. <b>Any whole number of pixels</b>: a map's sides
+        have to stay in whole 256&nbsp;px steps, so what an axis loses is rounded up to the next step and
+        <b>the opposite side makes up the difference</b> &mdash; ask for 156&nbsp;px off the top and 100&nbsp;px
+        come off the bottom with it. The side you asked for always loses exactly what you asked; the box above
+        shows what that ends up taking. The crop is the <em>last</em> thing the render does, after the Land/Sea
+        steps and after the framing, so it can only remove map: zoom and position never change, and every other
+        tab &mdash; rivers, states, terrain, provinces &mdash; sees the cropped map. The HOI4 edge bands are
+        re-laid on the new borders, so no land is left touching them. It works on a world map too, where
+        cropping left or right cuts real longitude away &mdash; the map then covers less than the full
+        360&deg;, so keep the seam in mind.</div>
+      <!-- Double size: hidden (the server still takes big=1, and the CLI
+           --double-size). A 2x map needs a hoi4.exe patched with the map size
+           unlocker, and it does not allow more provinces: the game's province
+           border limit is a count (~22,000 provinces), not a resolution, and
+           borders stopped being drawn on the user's 2x world map. -->
+      <div class="radio-row" style="display:none">
+        <input type="checkbox" id="doubleSize">
+        <label for="doubleSize" class="inline-label">Double size (2&times; width and height)</label>
+      </div>
+
       <label>World map</label>
       <div class="radio-row">
         <input type="checkbox" id="worldMap">
@@ -758,7 +832,7 @@
         <input type="checkbox" id="worldAntarctica" disabled>
         <label for="worldAntarctica" class="inline-label">Include Antarctica</label>
       </div>
-      <div class="hint">Shows every country (hidden ones excepted) edge to edge, with no margin; the country selection is then optional. With "Centre on" left on Auto, the map's edge runs through the Bering Strait.</div>
+      <div class="hint">Shows every country (hidden ones excepted) edge to edge, with no margin; the country selection is then optional. With "Centre on" left on Auto, the map's edge runs through the Bering Strait. One column of water is always kept on each side, whatever the edge bands below are set to: the game joins the two borders (the map wraps), so an island painted against one of them would end up next to whatever sits on the other.</div>
 
       <label>Map edges</label>
       <div class="radio-row">
@@ -768,6 +842,23 @@
         <span>px wide</span>
       </div>
       <div class="hint">Left edge: a band of sea, a band of unowned land (dark grey, impassable in the game: no movement across the map's wrap), a band of sea. Right edge: a band of sea. Each band 2-10 px wide. Nothing along the top and bottom. Painted over whatever the view shows there, so no land touches the left or right edge, and rivers leaving the map end at the sea. The unowned strip belongs to no country or state, gets provinces of its own and never carries rivers.</div>
+
+      <label>Sea level</label>
+      <div class="radio-row">
+        <input type="checkbox" id="seaRise">
+        <label for="seaRise" class="inline-label">Raise the sea by</label>
+        <input type="number" id="seaLevel" value="50" min="1" max="8000" step="1" style="width:5.5em">
+        <span>m</span>
+      </div>
+      <div class="hint">Every piece of land at or below that height becomes sea <em>before</em> the Land/Sea
+        steps, so lakes, island separation, strait fixing and the sieve clean up the new coastline. The people
+        who lived there are lost (each state keeps the share of its population still above water) and no city
+        &mdash; so no victory point &mdash; is left in the water; the drowned ground keeps its depth for the sea
+        colours and the naval terrain. Heights come from the NASA topography (Download tab), whose grey steps
+        about 26&nbsp;m: the rise lands on the nearest step, so anything under ~13&nbsp;m goes at the first one.
+        The Land/Sea tab's preview shows the drowned land in its own colour.</div>
+      <div class="error" id="seaTopoMissing" style="display:none">The NASA topography isn't downloaded: get it
+        from the Download tab (NASA Topographic Heightmap).</div>
 
       <label>Exclusive economic zones</label>
       <div class="radio-row">
@@ -793,7 +884,7 @@
 
       <label>Autonomous territories</label>
       <div class="radio-row">
-        <input type="checkbox" id="mergeAuto" checked>
+        <input type="checkbox" id="mergeAuto" checked onchange="renderSubdivisions()">
         <label for="mergeAuto" class="inline-label">Draw them as part of their country</label>
       </div>
       <div class="hint" id="mergeAutoList"></div>
@@ -813,6 +904,9 @@
       <div class="error" id="presetError" style="display:none"></div>
 
       <button class="primary" id="generate">Generate</button>
+      <div class="hint" id="genStale" style="display:none">These settings have changed since the map below was
+        drawn &mdash; press Generate to apply them. Nothing is ever rendered on its own: every tab draws only
+        when you ask it to.</div>
       <a class="small-btn" id="genDownload" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download this map</a>
 
       <div class="error" id="genError" style="display:none"></div>
@@ -826,13 +920,20 @@
     <div class="legend">
       <div class="legend-head">
         <h2>Visible countries</h2>
-        <button id="clearHidden" class="link-btn" style="display:none">Show all</button>
+        <button id="clearHidden" class="link-btn" style="display:none">Restore all</button>
       </div>
       <div id="legendList"></div>
 
       <div id="hiddenSection" style="display:none">
         <h2 style="margin-top:20px">Hidden countries</h2>
+        <div class="hint">Still land: unowned on this map, but real coastline, heightmap, terrain and provinces &mdash; so a strait stays a strait. The mod turns them into impassable wasteland owned by the country they border most.</div>
         <div id="hiddenList"></div>
+      </div>
+
+      <div id="removedSection" style="display:none">
+        <h2 style="margin-top:20px">Removed countries</h2>
+        <div class="hint">Taken off the map entirely: their land becomes sea on every tab, as if they had never been there. Use this rather than Hide when a neighbour is simply in the way (mainland Europe on a British Isles map). A removed country is also dropped from the selection, and the frame no longer counts it. One limit: a neighbour's border with a removed country is a land border in GADM, so that newly exposed shore is not seen as coastline by strait fixing or island separation.</div>
+        <div id="removedList"></div>
       </div>
     </div>
   </div>
@@ -965,8 +1066,8 @@
       <input type="number" id="pvRiverSplit" step="10">
       <div class="hint">A land province at least this big that a river cuts in two is split along the river (each piece at least 40&nbsp;px). 0 = off. Bits of a province left across a river, too small to be a province, go to the province on their side of the river when it is in the same state. Provinces under 20&nbsp;px are merged into a neighbour (islets and microstates with no neighbour of their own country excepted). Lakes: bordered by one country &rarr; its state with the longest shore; by several &rarr; the country with the longest shore, or, from 100&nbsp;px, divided along the GADM border when every part keeps 40&nbsp;px.</div>
       <label for="pvTarget">Target number of provinces</label>
-      <input type="number" id="pvTarget" step="500" min="0">
-      <div class="hint">0 = off. Otherwise the land provinces' sizes (min, max, river split) are scaled together so that land + sea + lakes come out at about this total (typically within 1%); the sea and lakes keep their own settings, so their count doesn't change. The scale used is shown after the render.</div>
+      <input type="number" id="pvTarget" step="500" min="0" max="22367">
+      <div class="hint">0 = off. Otherwise the land provinces' sizes (min, max, river split) are scaled together so that land + sea + lakes come out at about this total (typically within 1%); the sea and lakes keep their own settings, so their count doesn't change. The scale used is shown after the render.<br><b>At most 22,367.</b> Hearts of Iron IV draws at most 65,535 province borders (one per pair of neighbouring provinces, about 2.93 per province) and stops drawing them over large parts of the map past that -- a limit hardcoded in the game, the same at any map size. Whatever the settings, pairs of small land provinces are merged at the end until the map is under it; the border count is shown after the render.</div>
       <label>City provinces</label>
       <div class="ls-form" style="grid-template-columns:1fr auto;margin-top:0;align-items:center">
         <span class="radio-row" style="margin:0"><input type="checkbox" id="pvCities"><label for="pvCities" class="inline-label">Give cities their own province</label></span><span></span>
@@ -1528,7 +1629,8 @@ async function ctLoadSettings() {
 }
 
 // Right-hand list: every visible country with its number of cities (its
-// land share, or the user's override), editable; a change re-renders.
+// land share, or the user's override), editable. A change is kept and
+// applied at the next Render -- nothing here draws on its own (user).
 function ctShowCountries(r) {
   const list = r.countries || [];
   document.getElementById('ctCountsHint').innerHTML = list.length
@@ -1539,7 +1641,7 @@ function ctShowCountries(r) {
       <span class="swatch" style="background:${c.color}"></span>
       <span class="name">${escapeHtml(c.name)}<span class="ct-sub">${c.selected - c.isolated}${c.selected - c.isolated < c.quota ? ` of ${c.quota}` : ''} shown${c.isolated ? ` + ${c.isolated} isolated` : ''}${c.override ? ` · auto ${c.share}` : ''}</span></span>
       <input type="number" class="ct-count" data-tag="${c.tag}" min="0" max="100000" step="1" value="${c.quota}">
-      <button class="toggle-btn ct-reset" data-tag="${c.tag}" title="Back to its land share (${c.share})" ${c.override ? '' : 'style="visibility:hidden"'}>&#8634;</button>
+      <button class="toggle-btn ct-reset" data-tag="${c.tag}" data-share="${c.share}" title="Back to its land share (${c.share})" ${c.override ? '' : 'style="visibility:hidden"'}>&#8634;</button>
     </div>`).join('');
   ctCountryList.querySelectorAll('.ct-count').forEach(inp => {
     inp.addEventListener('change', () => {
@@ -1547,7 +1649,6 @@ function ctShowCountries(r) {
       if (!(Number.isInteger(v) && v >= 0)) { ctShowError('A number of cities must be a whole number, 0 or more.'); return; }
       ctCounts[inp.dataset.tag] = v;
       ctSaveCounts();
-      ctRender();
     });
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
   });
@@ -1555,9 +1656,19 @@ function ctShowCountries(r) {
     btn.addEventListener('click', () => {
       delete ctCounts[btn.dataset.tag];
       ctSaveCounts();
-      ctRender();
+      ctResetRow(btn);
     });
   });
+}
+
+// Put one row back to the country's automatic share, in the list only:
+// the map it describes is the one already on screen.
+function ctResetRow(btn) {
+  const row = btn.closest('.ct-country');
+  const input = row && row.querySelector('.ct-count');
+  if (input) input.value = btn.dataset.share;
+  if (row) row.classList.remove('ct-override');
+  btn.style.visibility = 'hidden';
 }
 
 async function ctRender() {
@@ -1638,7 +1749,7 @@ document.getElementById('ctReset').addEventListener('click', () => {
 ctClearCounts.addEventListener('click', () => {
   ctCounts = {};
   ctSaveCounts();
-  ctRender();
+  ctCountryList.querySelectorAll('.ct-reset').forEach(ctResetRow);
 });
 ctLoadSettings().catch(err => ctShowError(err.message));
 
@@ -2136,7 +2247,8 @@ function lsRenderLegend() {
   ).join('');
 }
 
-const LS_STEP_LABELS = { sea: 'Sea', lake: 'Lake', land: 'Land', hidden: 'Hidden country (counts as land)',
+const LS_STEP_LABELS = { sea: 'Sea', lake: 'Lake', drowned: 'Drowned (Countries tab: sea level)', land: 'Land',
+                   hidden: 'Hidden country (counts as land)',
                    separated: 'Island separation gap', suppressed: 'Erased island', grown: 'Island growth',
                    speck_filled: 'Filled sea speck', bridged: 'Diagonal connection',
                    micro: 'Microstate enlargement', sieved: 'Merged small area',
@@ -2151,6 +2263,9 @@ async function lsLoad() {
   lsState.maskColors = data.mask_colors;
   lsFillForm(data.settings);
   document.getElementById('lsLakesMissing').style.display = data.lakes_available ? 'none' : 'block';
+  // this fetch runs at start-up, so it is also where the Countries tab's sea
+  // level warning gets told whether the topography is there
+  document.getElementById('seaTopoMissing').style.display = data.topography_available ? 'none' : 'block';
   lsRenderLegend();
 }
 
@@ -2301,6 +2416,13 @@ function formatBytes(bytes) {
 const fileState = {};
 let pollTimer = null;
 
+function dlEta(s) {
+  if (s === null || s === undefined) return '';
+  if (s < 60) return `about ${s} s left`;
+  if (s < 3600) return `about ${Math.round(s / 60)} min left`;
+  return `about ${(s / 3600).toFixed(1)} h left`;
+}
+
 function controlHtml(key) {
   const f = fileState[key];
   const st = f.downloaded ? 'done' : (f.state && f.state.status) || 'idle';
@@ -2309,25 +2431,34 @@ function controlHtml(key) {
   if (st === 'done') {
     return `${label}<span class="dl-done">&#10003; Downloaded</span>`;
   }
-  if (st === 'downloading' || st === 'pending' || st === 'extracting') {
-    const bytes = (f.state && f.state.bytes) || 0;
-    const total = (f.state && f.state.total) || f.size_bytes;
+  if (st === 'downloading' || st === 'pending' || st === 'extracting' || st === 'retrying') {
+    const s = f.state || {};
+    const bytes = s.bytes || 0;
+    const total = s.total || f.size_bytes;
     const pct = total ? Math.min(100, (bytes / total) * 100) : 0;
     const verb = st === 'extracting' ? 'Extracting' : 'Downloading';
-    const text = st === 'pending' ? 'queued...'
+    // the connection dropped: it waits, then asks the server for the rest
+    const text = st === 'retrying'
+        ? `Connection lost at ${formatBytes(bytes)} \u2014 trying again in ${s.retry_in} s`
+          + `${s.attempt ? ` (attempt ${s.attempt + 1})` : ''}`
+      : st === 'pending' ? 'queued...'
       : (st === 'downloading' && bytes === 0) ? 'Waiting for the server to prepare the file...'
-      : `${verb}: ${total ? formatBytes(bytes) + ' / ' + formatBytes(total) : formatBytes(bytes)}`;
+      : `${verb}: ${total ? formatBytes(bytes) + ' / ' + formatBytes(total) : formatBytes(bytes)}`
+        + (s.speed ? ` \u00b7 ${formatBytes(s.speed)}/s` : '')
+        + (s.eta_s !== null && s.eta_s !== undefined ? ` \u00b7 ${dlEta(s.eta_s)}` : '');
     return `
       ${label}
-      <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <div class="progress-track"><div class="progress-fill${st === 'retrying' ? ' stalled' : ''}" style="width:${pct}%"></div></div>
       <span class="dl-progress-text">${text}</span>
     `;
   }
   if (st === 'error') {
     return `
       ${label}
-      <span class="dl-error-text" title="${(f.state && f.state.error) || ''}">Failed</span>
-      <button class="dl-action retry" data-action="start" data-key="${key}">Retry</button>
+      <span class="dl-error-text" title="${(f.state && f.state.error) || ''}">Failed${
+        (f.state && f.state.bytes) ? ` (${formatBytes(f.state.bytes)} kept)` : ''}</span>
+      <button class="dl-action retry" data-action="start" data-key="${key}" title="${
+        (f.state && f.state.bytes) ? 'Carries on from where it stopped' : 'Download again'}">Retry</button>
     `;
   }
   return `
@@ -2418,7 +2549,7 @@ async function loadDownloads() {
       listEl.appendChild(card);
     });
     updateSummary();
-    if (Object.values(fileState).some(f => f.state && ['downloading', 'pending', 'extracting'].includes(f.state.status))) {
+    if (Object.values(fileState).some(f => f.state && ['downloading', 'pending', 'extracting', 'retrying'].includes(f.state.status))) {
       ensurePolling();
     }
   } catch (err) {
@@ -2495,7 +2626,7 @@ async function pollStatus() {
     // A file still shown as active keeps the polling going, even if the
     // server hasn't reported it yet.
     const shown = fileState[key].state && fileState[key].state.status;
-    if (!fileState[key].downloaded && ['downloading', 'pending', 'extracting'].includes(shown)) anyActive = true;
+    if (!fileState[key].downloaded && ['downloading', 'pending', 'extracting', 'retrying'].includes(shown)) anyActive = true;
   }
   updateSummary();
   if (!anyActive) {
@@ -2527,13 +2658,43 @@ function escapeHtml(text) {
 }
 
 // ---------- shared state ----------
+// Two ways to take a country off the map, sent as `excluded` / `removed`:
+// hidden countries keep their land (unowned, wasteland in the mod), removed
+// ones leave sea behind. See core.render_map_detailed.
 const excludedTags = new Set();
+const removedTags = new Set();
 
 // ---------- tab 1: generate ----------
 const selectedTags = new Set();
-const excludedSubs = new Set();   // GID_1 ids left out ("USA.12_1" = Hawaii)
-const subdivCache = {};           // tag -> [{id, name, type}]
-const includedSubs = new Map();   // GID_1 of unselected countries -> {name, country}
+// GADM subdivision ids left out / added in, both levels in one set each: an
+// id says which level it is ("USA.12_1" level 1 = Hawaii, "GBR.3.27_1"
+// level 2 = the Shetland Islands), so the server needs no extra parameter.
+const excludedSubs = new Set();
+const subdivCache = {};           // "tag@level" -> [{id, name, type, parent}]
+const includedSubs = new Map();   // id of unselected countries -> {name, country, level}
+const SUBDIV_LEVELS = [1, 2];
+let autonomousParents = {};       // {child tag: parent tag}, from /api/colors
+
+// Whose subdivisions can be ticked: the selected countries, plus the
+// autonomous territories drawn as part of them while "Draw them as part of
+// their country" is on. Jersey and Guernsey are GADM countries of their
+// own, not British subdivisions, so unticking their parishes here is the
+// only way to drop the Channel Islands from a map of the British Isles.
+function subdivCountries() {
+  const tags = [...selectedTags];
+  if (document.getElementById('mergeAuto').checked) {
+    for (const [child, parent] of Object.entries(autonomousParents || {})) {
+      if (selectedTags.has(parent) && !tags.includes(child)) tags.push(child);
+    }
+  }
+  return tags;
+}
+const gidLevel = id => (String(id).split('_')[0].match(/\./g) || []).length;
+// per level: the elements of its section
+const subdivUI = {
+  1: { section: 'subdivSection', search: 'subdivSearch', results: 'subdivResults', chips: 'includedChips' },
+  2: { section: 'subdiv2Section', search: 'subdiv2Search', results: 'subdiv2Results', chips: 'included2Chips' },
+};
 const foldText = t => (t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const countryList = document.getElementById('countryList');
 const selectedChips = document.getElementById('selectedChips');
@@ -2553,12 +2714,14 @@ const generateBtn = document.getElementById('generate');
     if (s.opacity) op.value = s.opacity;
   } catch (e) { /* storage unavailable */ }
   const save = () => { try { localStorage.setItem('mapTool.eez', JSON.stringify({ show: box.checked, opacity: op.value })); } catch (e) { /* storage unavailable */ } };
-  [box, op].forEach(el => el.addEventListener('change', () => { save(); if (genImageArea.querySelector('img')) generate(); }));
+  [box, op].forEach(el => el.addEventListener('change', save));  // shown at the next Generate (user)
 })();
 const genImageArea = document.getElementById('genImageArea');
 const legendList = document.getElementById('legendList');
 const hiddenSection = document.getElementById('hiddenSection');
 const hiddenList = document.getElementById('hiddenList');
+const removedSection = document.getElementById('removedSection');
+const removedList = document.getElementById('removedList');
 const clearHiddenBtn = document.getElementById('clearHidden');
 const genMeta = document.getElementById('genMeta');
 const genError = document.getElementById('genError');
@@ -2604,35 +2767,41 @@ function renderChips() {
   renderSubdivisions();
 }
 
-// One collapsible block per selected country with its GADM level-1
-// subdivisions; unticked ones are sent as `subx`.
-async function renderSubdivisions() {
-  const box = document.getElementById('subdivSection');
-  for (const id of [...excludedSubs]) {             // forget unselected countries' choices
-    if (!selectedTags.has(id.split('.')[0])) excludedSubs.delete(id);
+// One collapsible block per selected country with its GADM subdivisions at
+// `level`; unticked ones are sent as `subx` (level 1 and 2 share that list).
+async function renderSubdivisions(level) {
+  if (level === undefined) { await Promise.all(SUBDIV_LEVELS.map(renderSubdivisions)); return; }
+  const box = document.getElementById(subdivUI[level].section);
+  const tags = subdivCountries();
+  const listed = new Set(tags);
+  for (const id of [...excludedSubs]) {             // forget unlisted countries' choices
+    if (!listed.has(id.split('.')[0])) excludedSubs.delete(id);
   }
-  const tags = [...selectedTags];
   if (!tags.length) {
     box.innerHTML = '<div class="hint">Select a country to list its subdivisions.</div>';
     return;
   }
-  await Promise.all(tags.filter(t => !subdivCache[t]).map(async t => {
+  const ck = t => `${t}@${level}`;
+  await Promise.all(tags.filter(t => !subdivCache[ck(t)]).map(async t => {
     try {
-      const d = await fetch(`/api/subdivisions?tag=${encodeURIComponent(t)}`).then(r => r.json());
-      subdivCache[t] = d.subdivisions || [];
-    } catch (e) { subdivCache[t] = []; }
+      const d = await fetch(`/api/subdivisions?tag=${encodeURIComponent(t)}&level=${level}`).then(r => r.json());
+      subdivCache[ck(t)] = d.subdivisions || [];
+    } catch (e) { subdivCache[ck(t)] = []; }
   }));
   const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.tag));
   box.innerHTML = '';
   tags.forEach(t => {
-    const subs = subdivCache[t] || [];
+    const subs = subdivCache[ck(t)] || [];
     const c = allCountries.find(c => c.tag === t);
     const det = document.createElement('details');
     det.className = 'subdiv-block';
     det.dataset.tag = t;
     if (open.has(t)) det.open = true;
     const kept = () => subs.filter(sd => !excludedSubs.has(sd.id)).length;
-    det.innerHTML = `<summary>${escapeHtml(c ? c.name : t)}<span class="count"></span></summary>`;
+    const merged = !selectedTags.has(t);
+    det.innerHTML = `<summary>${escapeHtml(c ? c.name : t)}` +
+      (merged ? ` <span class="muted">(drawn as part of ${escapeHtml(countryName(autonomousParents[t]))})</span>` : '') +
+      `<span class="count"></span></summary>`;
     const count = det.querySelector('.count');
     const updateCount = () => {
       count.textContent = subs.length ? `${kept()} of ${subs.length} ticked` : 'no subdivisions in GADM';
@@ -2647,8 +2816,9 @@ async function renderSubdivisions() {
       subs.forEach(sd => {
         const row = document.createElement('label');
         row.className = 'country-row';
+        const note = [sd.type || '', sd.parent || ''].filter(Boolean).join(' \u00b7 ');
         row.innerHTML = `<input type="checkbox" ${excludedSubs.has(sd.id) ? '' : 'checked'}>
-                         <span class="name">${escapeHtml(sd.name)}</span><span class="tag">${escapeHtml(sd.type || '')}</span>`;
+                         <span class="name">${escapeHtml(sd.name)}</span><span class="tag">${escapeHtml(note)}</span>`;
         row.querySelector('input').addEventListener('change', e => {
           if (e.target.checked) excludedSubs.delete(sd.id); else excludedSubs.add(sd.id);
           updateCount();
@@ -2668,18 +2838,20 @@ async function renderSubdivisions() {
     }
     box.appendChild(det);
   });
-  applySubdivFilter();
-  renderIncludedChips();
+  applySubdivFilter(level);
+  renderIncludedChips(level);
 }
 
 // The search box filters the selected countries' lists (opening blocks with
 // matches) and lists matching subdivisions of other countries to add.
-function applySubdivFilter() {
-  const q = foldText(document.getElementById('subdivSearch').value.trim());
-  document.querySelectorAll('#subdivSection details.subdiv-block').forEach(det => {
+function applySubdivFilter(level) {
+  if (level === undefined) { SUBDIV_LEVELS.forEach(applySubdivFilter); return; }
+  const q = foldText(document.getElementById(subdivUI[level].search).value.trim());
+  document.querySelectorAll(`#${subdivUI[level].section} details.subdiv-block`).forEach(det => {
     let hits = 0;
     det.querySelectorAll('.country-row').forEach(row => {
-      const show = !q || foldText(row.querySelector('.name').textContent).includes(q);
+      const show = !q || foldText(row.querySelector('.name').textContent).includes(q)
+                      || foldText(row.querySelector('.tag').textContent).includes(q);
       row.style.display = show ? '' : 'none';
       hits += show;
     });
@@ -2687,10 +2859,12 @@ function applySubdivFilter() {
   });
 }
 
-function renderIncludedChips() {
-  const box = document.getElementById('includedChips');
+function renderIncludedChips(level) {
+  if (level === undefined) { SUBDIV_LEVELS.forEach(renderIncludedChips); return; }
+  const box = document.getElementById(subdivUI[level].chips);
   box.innerHTML = '';
   for (const [id, info] of includedSubs) {
+    if (gidLevel(id) !== level) continue;
     if (selectedTags.has(id.split('.')[0])) continue;   // its country is selected: already framed
     const chip = document.createElement('span');
     chip.className = 'chip';
@@ -2698,23 +2872,24 @@ function renderIncludedChips() {
     chip.innerHTML = `${escapeHtml(info.name)} <span class="tag">(${escapeHtml(info.country)})</span><button title="Remove">&times;</button>`;
     chip.querySelector('button').addEventListener('click', () => {
       includedSubs.delete(id);
-      renderIncludedChips();
-      searchSubdivisions();
+      renderIncludedChips(level);
+      searchSubdivisions(level);
     });
     box.appendChild(chip);
   }
 }
 
-let subdivSearchTimer = null;
-async function searchSubdivisions() {
-  const q = document.getElementById('subdivSearch').value.trim();
-  const box = document.getElementById('subdivResults');
+const subdivSearchTimer = {};
+async function searchSubdivisions(level) {
+  const q = document.getElementById(subdivUI[level].search).value.trim();
+  const box = document.getElementById(subdivUI[level].results);
   if (!q) { box.innerHTML = ''; return; }
   let results = [];
   try {
-    results = (await fetch(`/api/subdivisions/search?q=${encodeURIComponent(q)}`).then(r => r.json())).results || [];
+    results = (await fetch(`/api/subdivisions/search?q=${encodeURIComponent(q)}&level=${level}`)
+      .then(r => r.json())).results || [];
   } catch (e) { results = []; }
-  if (q !== document.getElementById('subdivSearch').value.trim()) return;  // a newer search is on its way
+  if (q !== document.getElementById(subdivUI[level].search).value.trim()) return;  // a newer search is on its way
   box.innerHTML = '';
   if (!results.length) {
     box.innerHTML = '<div class="subdiv-result"><span class="muted">No subdivision matches.</span></div>';
@@ -2723,26 +2898,29 @@ async function searchSubdivisions() {
   results.forEach(r => {
     const row = document.createElement('div');
     row.className = 'subdiv-result';
-    const selected = selectedTags.has(r.tag);
+    const selected = subdivCountries().includes(r.tag);
     const added = includedSubs.has(r.id);
-    row.innerHTML = `<span class="grow">${escapeHtml(r.name)} <span class="muted">${escapeHtml(r.type || '')} &middot; ${escapeHtml(r.country)}</span></span>` +
+    const where = [r.type || '', r.parent || '', r.country].filter(Boolean).join(' \u00b7 ');
+    row.innerHTML = `<span class="grow">${escapeHtml(r.name)} <span class="muted">${escapeHtml(where)}</span></span>` +
       (selected ? '<span class="muted">country selected: tick/untick it below</span>'
                 : `<button class="link-btn">${added ? 'Remove' : 'Add'}</button>`);
     const btn = row.querySelector('button');
     if (btn) btn.addEventListener('click', () => {
       if (includedSubs.has(r.id)) includedSubs.delete(r.id);
       else includedSubs.set(r.id, { name: r.name, country: r.country });
-      renderIncludedChips();
-      searchSubdivisions();
+      renderIncludedChips(level);
+      searchSubdivisions(level);
     });
     box.appendChild(row);
   });
 }
 
-document.getElementById('subdivSearch').addEventListener('input', () => {
-  applySubdivFilter();
-  clearTimeout(subdivSearchTimer);
-  subdivSearchTimer = setTimeout(searchSubdivisions, 200);
+SUBDIV_LEVELS.forEach(level => {
+  document.getElementById(subdivUI[level].search).addEventListener('input', () => {
+    applySubdivFilter(level);
+    clearTimeout(subdivSearchTimer[level]);
+    subdivSearchTimer[level] = setTimeout(() => searchSubdivisions(level), 200);
+  });
 });
 
 // "Centre on": Auto + the selected countries (every country in world mode).
@@ -2776,10 +2954,9 @@ async function init() {
   sizes.forEach(([w, h]) => {
     const opt = document.createElement('option');
     opt.value = `${w}x${h}`;
-    const orient = w > h ? 'landscape' : w < h ? 'portrait' : 'square';
-    opt.textContent = `${w} × ${h} (${orient})`;
     outputSizeSelect.appendChild(opt);
   });
+  labelOutputSizes();
   // the last view (or the one a parameters file brought), else the default
   const saved = restoreView();
   renderCountryList('');
@@ -2914,6 +3091,7 @@ async function pvRender() {
       ${r.land ? `<div>Land: ${f(r.land.mean_px)} px on average (median ${f(r.land.median_px)}); ${f(r.land_below_min)} under the minimum, ${f(r.land_above_max)} over the maximum</div>` : ''}
       ${r.sea ? `<div>Sea: ${f(r.sea.mean_px)} px on average (median ${f(r.sea.median_px)}); ${f(r.sea_below_min)} under the minimum, ${f(r.sea_above_max)} over the maximum</div>` : ''}
       <div>${f(r.states)} states; ${f(r.coastal)} coastal provinces</div>
+      ${r.borders ? `<div>${f(r.borders.count)} province borders${r.borders.count > r.borders.limit ? '' : ` of the ${f(r.borders.limit)} the game draws`}${r.borders.note ? ` &mdash; <b>${escapeHtml(r.borders.note)}</b>` : ''}</div>` : ''}
       ${r.target_count ? `<div>Target ${f(r.target_count.aim)}: land sizes &times;${r.target_count.land_scale} (land ${f(r.target_count.land_min)}&ndash;${f(r.target_count.land_max)} px), ${r.target_count.passes.length} sizing pass${r.target_count.passes.length > 1 ? 'es' : ''} &rarr; ${f(r.count)} provinces (${r.count >= r.target_count.aim ? '+' : ''}${(100 * (r.count - r.target_count.aim) / r.target_count.aim).toFixed(1)}%)${r.target_count.note ? ` &mdash; <b>out of reach, ${escapeHtml(r.target_count.note)}</b>` : ''}</div>` : ''}
       ${r.city_provinces ? (r.city_provinces.available ? `<div>City provinces: ${f(r.city_provinces.count)} &mdash; ${f(r.city_provinces.named)} cities${r.city_provinces.count > r.city_provinces.named ? `, ${f(r.city_provinces.count - r.city_provinces.named)} more from urban areas over the size limit` : ''} (${f(r.city_provinces.px)} px)</div>` : '<div><b>City provinces: no cities or no terrain (City / Terrain tabs)</b></div>') : ''}
       <div>Sea: ${f(r.sea_centre_split)} provinces split (or joined) so that their centre lies within them${r.sea_centre_outside ? ` &mdash; <b>${r.sea_centre_outside} left</b>` : ''}</div>
@@ -3238,16 +3416,12 @@ function stShowCountries(r) {
     const v = Number(inp.value);
     if (!(v >= 0.1 && v <= 10)) { stShowError('A country factor must be between 0.1 and 10.'); return; }
     if (v === 1) delete stFactors[inp.dataset.tag]; else stFactors[inp.dataset.tag] = v;
-    stSave();
-    const view = currentViewParams();
-    if (view && stShownView === JSON.stringify(view)) stRender(); else stLoadLevels();
+    stSave();   // applied at the next Render (user: never render unasked)
   }));
   list.querySelectorAll('.st-level').forEach(sel => {
     sel.addEventListener('change', () => {
       if (sel.value === '') delete stLevels[sel.dataset.tag]; else stLevels[sel.dataset.tag] = Number(sel.value);
       stSave();
-      const view = currentViewParams();
-      if (view && stShownView === JSON.stringify(view)) stRender(); else stLoadLevels();
     });
   });
 }
@@ -3340,13 +3514,71 @@ stMerge.addEventListener('keydown', e => { if (e.key === 'Enter') stRender(); })
 document.getElementById('stResetLevels').addEventListener('click', () => {
   stLevels = {};
   stSave();
-  const view = currentViewParams();
-  if (view && stShownView === JSON.stringify(view)) stRender(); else stLoadLevels();
+  stLoadLevels();   // refill the list (no render); the map follows at the next Render
 });
 document.querySelector('.tab-btn[data-tab=states]').addEventListener('click', () => {
   const view = currentViewParams();
   if (!view || stShownView !== JSON.stringify(view)) stLoadLevels();
 });
+
+// The forced crop: "left,right,top,bottom" in pixels as asked, '' when off
+// or all zero. Any whole number goes -- cropBalanced mirrors the server's
+// core.balance_crop, which rounds what each axis loses up to a whole
+// CROP_STEP by taking the rest off the opposite side.
+const CROP_STEP = 256;
+const CROP_INPUTS = { left: 'cropLeft', right: 'cropRight', top: 'cropTop', bottom: 'cropBottom' };
+const CROP_AXES = [['left', 'right'], ['top', 'bottom']];
+
+function cropSides() {
+  const out = {};
+  for (const [side, id] of Object.entries(CROP_INPUTS)) {
+    out[side] = Math.max(0, Math.round(Number(document.getElementById(id).value) || 0));
+  }
+  return out;
+}
+
+// core.balance_crop: the make-up goes to the smaller side of the axis (the
+// right / bottom one when they are equal), so with one side at 0 it is that
+// side that takes it.
+function cropBalanced(asked) {
+  const out = { ...asked };
+  for (const [a, b] of CROP_AXES) {
+    const pad = (CROP_STEP - ((out[a] + out[b]) % CROP_STEP)) % CROP_STEP;
+    if (pad) out[out[b] <= out[a] ? b : a] += pad;
+  }
+  return out;
+}
+
+function cropValue() {
+  if (!document.getElementById('cropOn').checked) return '';
+  const c = cropSides();
+  const any = Object.values(c).some(v => v > 0);
+  return any ? `${c.left},${c.right},${c.top},${c.bottom}` : '';
+}
+
+function cropRefresh() {
+  const on = document.getElementById('cropOn').checked;
+  document.getElementById('cropFields').style.display = on ? 'grid' : 'none';
+  const c = cropSides();
+  for (const [side, id] of Object.entries(CROP_INPUTS)) document.getElementById(id).value = c[side];
+  const note = document.getElementById('cropNote');
+  const bal = cropBalanced(c);
+  const cut = Object.keys(CROP_INPUTS).filter(side => bal[side] > 0);
+  if (on && cut.length) {
+    const added = cut.filter(side => bal[side] !== c[side]);
+    note.innerHTML = 'Takes ' + cut.map(side => `<b>${bal[side]}px</b> off the ${side}`).join(', ')
+      + ` &mdash; ${bal.left + bal.right}px across, ${bal.top + bal.bottom}px down.`
+      + (added.length ? ` The ${added.join(' and ')} made the count up to a whole 256px step.` : '');
+    note.style.display = 'block';
+  } else {
+    note.style.display = 'none';
+  }
+}
+
+document.getElementById('cropOn').addEventListener('change', cropRefresh);
+for (const id of Object.values(CROP_INPUTS)) {
+  document.getElementById(id).addEventListener('change', cropRefresh);
+}
 
 function currentViewParams() {
   const world = document.getElementById('worldMap').checked;
@@ -3359,13 +3591,18 @@ function currentViewParams() {
     projection: projectionSelect.value,
     margin: marginInput.value,
     excluded: [...excludedTags].join(','),
+    removed: [...removedTags].join(','),
     size: outputSizeSelect.value,
+    big: document.getElementById('doubleSize').checked ? '1' : '0',
     mainland: ignoreOverseasBox.checked ? '1' : '0',
     merge: document.getElementById('mergeAuto').checked ? '1' : '0',
     world: world ? '1' : '0',
     antarctica: document.getElementById('worldAntarctica').checked ? '1' : '0',
     edges: document.getElementById('edgeBands').checked ? '1' : '0',
     edge_px: String(Math.min(10, Math.max(2, Math.round(Number(document.getElementById('edgeBandPx').value) || 4)))),
+    crop: cropValue(),
+    sea: document.getElementById('seaRise').checked
+      ? String(Math.min(8000, Math.max(1, Math.round(Number(document.getElementById('seaLevel').value) || 0)))) : '0',
     center: document.getElementById('centerOn').value,
   };
 }
@@ -3374,6 +3611,29 @@ function currentViewParams() {
 // rivers) for one view: while the Countries tab shows that same view, it
 // shows this map instead of the plain render. Set by rvRender.
 let genFitted = null; // {key, params, fit}
+
+// "The map below is out of date": the settings the displayed map was drawn
+// with, against the ones in the form now. Nothing re-renders on its own
+// (user), so this is what says a Generate is due. Every control of the tab
+// is covered, including the ones that are buttons rather than inputs (the
+// chips, the legend's Hide / Remove), by listening on the whole page.
+let renderedSig = null;
+
+function viewSignature() {
+  const v = currentViewParams();
+  return v === null ? null : JSON.stringify([v, document.getElementById('eezShow').checked,
+                                             document.getElementById('eezOpacity').value]);
+}
+
+function refreshStale() {
+  const sig = viewSignature();
+  document.getElementById('genStale').style.display =
+    renderedSig !== null && sig !== null && sig !== renderedSig ? 'block' : 'none';
+}
+
+for (const ev of ['input', 'change', 'click']) {
+  document.getElementById('page-generate').addEventListener(ev, () => setTimeout(refreshStale, 0));
+}
 
 // The Countries tab's view, remembered in localStorage at every render
 // (mapTool.view) and restored at start -- also how a parameters file brings
@@ -3387,7 +3647,7 @@ function saveView() {
   for (const [id, v] of includedSubs) inc[id] = v;
   try {
     localStorage.setItem(VIEW_STORE, JSON.stringify({ ...view, excluded_tags: [...excludedTags],
-      excluded_subs: [...excludedSubs], included_subs: inc }));
+      removed_tags: [...removedTags], excluded_subs: [...excludedSubs], included_subs: inc }));
   } catch (e) { /* storage unavailable */ }
 }
 
@@ -3399,6 +3659,8 @@ function restoreView() {
   (v.tags || '').split(',').filter(Boolean).forEach(t => selectedTags.add(t));
   excludedTags.clear();
   (v.excluded_tags || []).forEach(t => excludedTags.add(t));
+  removedTags.clear();
+  (v.removed_tags || []).forEach(t => removedTags.add(t));
   excludedSubs.clear();
   (v.excluded_subs || []).forEach(id => excludedSubs.add(id));
   includedSubs.clear();
@@ -3408,16 +3670,30 @@ function restoreView() {
   set('projection', v.projection);
   set('margin', v.margin);
   set('outputSize', v.size);
+  document.getElementById('doubleSize').checked = false;  // hidden control
+  labelOutputSizes();
   tick('ignoreOverseas', v.mainland);
   tick('mergeAuto', v.merge);
   tick('worldMap', v.world);
   tick('worldAntarctica', v.antarctica);
   tick('edgeBands', v.edges);
   set('edgeBandPx', v.edge_px);
+  const cropParts = (v.crop || '').split(',').filter(s => s !== '');
+  document.getElementById('cropOn').checked = cropParts.length === 4;
+  Object.values(CROP_INPUTS).forEach((id, i) => {
+    document.getElementById(id).value = cropParts.length === 4 ? cropParts[i] : 0;
+  });
+  cropRefresh();
+  const sea = Number(v.sea || 0);
+  document.getElementById('seaRise').checked = sea > 0;
+  if (sea > 0) set('seaLevel', String(sea));
   return v;
 }
 
-async function generate() {
+// recolor: only the colours changed (colour editor, preset) -- the server
+// recolours the cached render (no new map), and the map, legend and info
+// stay on screen until the recoloured ones arrive.
+async function generate({ recolor = false } = {}) {
   const view = currentViewParams();
   if (view) saveView();
   if (!view) {
@@ -3427,11 +3703,13 @@ async function generate() {
   }
 
   generateBtn.disabled = true;
-  generateBtn.textContent = 'Rendering...';
+  generateBtn.textContent = recolor ? 'Recolouring...' : 'Rendering...';
   genError.style.display = 'none';
-  genImageArea.innerHTML = '<div class="spinner"></div>';
-  legendList.innerHTML = '';
-  genMeta.innerHTML = '';
+  if (!recolor || !genImageArea.querySelector('img')) {
+    genImageArea.innerHTML = '<div class="spinner"></div>';
+    legendList.innerHTML = '';
+    genMeta.innerHTML = '';
+  }
 
   const params = new URLSearchParams(view);
   // EEZ overlay: only on this map's image (not part of the view other tabs use).
@@ -3460,6 +3738,13 @@ async function generate() {
       <div>Centred on ${meta.center_country ? escapeHtml(countryName(meta.center_country)) : 'auto'} (central meridian ${meta.central_meridian}&deg;)</div>
       <div>${meta.projection_label}</div>
       <div>${meta.width} &times; ${meta.height}px (${meta.size_mode})</div>
+      ${meta.crop && Object.values(meta.crop).some(v => v > 0)
+        ? `<div>Cropped from ${meta.uncropped_size[0]} &times; ${meta.uncropped_size[1]}px: `
+          + ['left', 'right', 'top', 'bottom'].filter(k => meta.crop[k] > 0)
+              .map(k => `${meta.crop[k]}px ${k}`
+                        + (meta.crop_asked && meta.crop[k] !== meta.crop_asked[k] ? ' (to the 256px step)' : ''))
+              .join(', ') + '</div>'
+        : ''}
       <div>Margin: ${meta.world ? 'none (world map)' : meta.margin_percent + '%'}</div>
       ${meta.overseas_regions.map(o => `<div>Framing ignores (${escapeHtml(o.name)}): ${o.regions.map(escapeHtml).join(', ')}</div>`).join('')}
       <div>${meta.visible_countries.length} countries visible</div>
@@ -3479,6 +3764,8 @@ async function generate() {
     `;
 
     renderLegend(meta.visible_countries);
+    renderedSig = viewSignature();   // the map on screen now matches the form
+    refreshStale();
 
   } catch (err) {
     genError.textContent = err.message;
@@ -3495,7 +3782,13 @@ function countryName(tag) {
   return c ? c.name : tag;
 }
 
+// The countries the map on screen actually shows -- renderLegend is called
+// again, without rendering, whenever Hide / Remove / Show / Restore move one
+// between the lists.
+let lastVisibleCountries = [];
+
 function renderLegend(visibleCountries) {
+  lastVisibleCountries = visibleCountries;
   legendList.innerHTML = '';
   visibleCountries.forEach(c => {
     const row = document.createElement('div');
@@ -3504,49 +3797,82 @@ function renderLegend(visibleCountries) {
       <span class="swatch clickable" style="background:${c.color}" title="Change ${c.name}'s colour"></span>
       <span class="tag">${c.tag}</span>
       <span class="name">${c.name}</span>
-      <button class="toggle-btn" data-tag="${c.tag}" title="Hide this country">Hide</button>
+      <span class="btns">
+        <button class="toggle-btn hide-btn" data-tag="${c.tag}" title="Hide ${c.name}: not drawn, but its land stays (unowned wasteland in the mod)">Hide</button>
+        <button class="toggle-btn remove-btn" data-tag="${c.tag}" title="Remove ${c.name} from the map: its land becomes sea on every tab">Remove</button>
+      </span>
     `;
     row.querySelector('.swatch').addEventListener('click', () => openColorEditor(c));
-    row.querySelector('.toggle-btn').addEventListener('click', () => {
+    row.querySelector('.hide-btn').addEventListener('click', () => {
       excludedTags.add(c.tag);
-      generate();
+      removedTags.delete(c.tag);
+      renderLegend(visibleCountries.filter(v => v.tag !== c.tag));
+    });
+    row.querySelector('.remove-btn').addEventListener('click', () => {
+      removedTags.add(c.tag);
+      excludedTags.delete(c.tag);
+      // a removed country can't frame the map, so it leaves the selection too
+      if (selectedTags.delete(c.tag)) {
+        renderChips();
+        renderCountryList(countryFilter.value);
+      }
+      renderLegend(visibleCountries.filter(v => v.tag !== c.tag));
     });
     legendList.appendChild(row);
   });
 
-  hiddenList.innerHTML = '';
-  [...excludedTags].sort().forEach(tag => {
-    const row = document.createElement('div');
-    row.className = 'legend-item hidden-item';
-    row.innerHTML = `
-      <span class="swatch" style="background:transparent;border:1px dashed var(--muted)"></span>
-      <span class="tag">${tag}</span>
-      <span class="name">${countryName(tag)}</span>
-      <button class="toggle-btn" data-tag="${tag}" title="Show this country">Show</button>
-    `;
-    row.querySelector('.toggle-btn').addEventListener('click', () => {
-      excludedTags.delete(tag);
-      generate();
+  // One row per country taken off the map, with the way back.
+  const offMap = (list, set, cls, title, label) => {
+    list.innerHTML = '';
+    [...set].sort().forEach(tag => {
+      const row = document.createElement('div');
+      row.className = `legend-item ${cls}`;
+      row.innerHTML = `
+        <span class="swatch" style="background:transparent;border:1px dashed var(--muted)"></span>
+        <span class="tag">${tag}</span>
+        <span class="name">${countryName(tag)}</span>
+        <span class="btns"><button class="toggle-btn" title="${title}">${label}</button></span>
+      `;
+      row.querySelector('.toggle-btn').addEventListener('click', () => {
+        set.delete(tag);
+        renderLegend(visibleCountries);
+      });
+      list.appendChild(row);
     });
-    hiddenList.appendChild(row);
-  });
+  };
+  offMap(hiddenList, excludedTags, 'hidden-item', 'Show this country again', 'Show');
+  offMap(removedList, removedTags, 'removed-item', 'Put this country back on the map', 'Restore');
 
   hiddenSection.style.display = excludedTags.size ? 'block' : 'none';
-  clearHiddenBtn.style.display = excludedTags.size ? 'inline-block' : 'none';
+  removedSection.style.display = removedTags.size ? 'block' : 'none';
+  clearHiddenBtn.style.display = (excludedTags.size || removedTags.size) ? 'inline-block' : 'none';
 }
 
 clearHiddenBtn.addEventListener('click', () => {
   excludedTags.clear();
-  generate();
+  removedTags.clear();
+  renderLegend(lastVisibleCountries);
 });
 
-generateBtn.addEventListener('click', generate);
+generateBtn.addEventListener('click', () => generate());
 document.getElementById('worldMap').addEventListener('change', () => {
   const world = document.getElementById('worldMap').checked;
   document.getElementById('worldAntarctica').disabled = !world;
   marginInput.disabled = world;  // the world map has no margin
   refreshCenterOptions();
 });
+// The size options show the real output size (doubled with "Double size";
+// the value sent stays the base size, the server doubles it).
+function labelOutputSizes() {
+  const f = document.getElementById('doubleSize').checked ? 2 : 1;
+  for (const opt of outputSizeSelect.options) {
+    if (opt.value === 'auto') continue;
+    const [w, h] = opt.value.split('x').map(Number);
+    const orient = w > h ? 'landscape' : w < h ? 'portrait' : 'square';
+    opt.textContent = `${w * f} × ${h * f} (${orient})`;
+  }
+}
+document.getElementById('doubleSize').addEventListener('change', labelOutputSizes);
 document.getElementById('edgeBands').addEventListener('change', () => {
   document.getElementById('edgeBandPx').disabled = !document.getElementById('edgeBands').checked;
 });
@@ -3590,6 +3916,10 @@ function renderColorsState(state) {
   presetDeleteState();
   const auto = Object.entries(state.autonomous || {}).map(([c, p]) => `${countryName(c)} &rarr; ${countryName(p)}`);
   document.getElementById('mergeAutoList').innerHTML = auto.join(', ');
+  // the subdivision lists show these territories' own subdivisions while
+  // they are merged in, so they need this map
+  autonomousParents = state.autonomous || {};
+  renderSubdivisions();
 }
 
 async function loadColorsState() {
@@ -3611,7 +3941,7 @@ document.getElementById('presetLoad').addEventListener('click', async () => {
       body: JSON.stringify({ name: presetSelect.value }),
     }));
     presetShowError('');
-    if (selectedTags.size) generate();
+    if (selectedTags.size || document.getElementById('worldMap').checked) generate({ recolor: true });
   } catch (err) { presetShowError(err.message); }
 });
 document.getElementById('presetSave').addEventListener('click', async () => {
@@ -3632,7 +3962,7 @@ document.getElementById('presetDelete').addEventListener('click', async () => {
   try {
     renderColorsState(await colorsRequest(`/api/colors/presets/${encodeURIComponent(name)}`, { method: 'DELETE' }));
     presetShowError('');
-    if (selectedTags.size) generate();
+    if (selectedTags.size || document.getElementById('worldMap').checked) generate({ recolor: true });
   } catch (err) { presetShowError(err.message); }
 });
 
@@ -3751,7 +4081,7 @@ async function applyEditorColor(rgb) {
     } else {
       presetShowError('');
     }
-    generate();
+    generate({ recolor: true });
   } catch (err) { colorNote.textContent = err.message; }
 }
 
@@ -4122,6 +4452,65 @@ document.getElementById('refreshApp').addEventListener('click', restartTool);
 checkForUpdate();
 setInterval(checkForUpdate, 5000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+
+// ---------- the bar at the top: what is being computed, and how long is left
+// (user: "whenever rendering any map, display a progress bar on top, with an
+// estimated ETA"). The server knows: every tab's stages go through one place
+// (app._stage_get -> render_progress), and the ETA comes from how long that
+// stage took on the last runs of this size. Polled rather than tied to the
+// fetches, so it also covers the <img> the tabs load.
+let rbLast = 0;
+function renderBarEl() {
+  let bar = document.getElementById('renderBar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'renderBar';
+    bar.className = 'render-bar';
+    bar.innerHTML = '<span class="rb-label"></span><div class="rb-track"><div class="rb-fill"></div></div>'
+                  + '<span class="rb-eta"></span><span class="rb-note"></span>';
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+  return bar;
+}
+
+function showProgress(p) {
+  const bar = renderBarEl();
+  if (!p || !p.active) { bar.style.display = 'none'; return; }
+  const fill = bar.querySelector('.rb-fill');
+  bar.querySelector('.rb-label').innerHTML = `<b>${escapeHtml(p.label)}</b>${p.step > 1 ? ` (step ${p.step})` : ''}`;
+  if (p.progress === null) {
+    fill.classList.add('indeterminate');
+    fill.style.width = '';
+    bar.querySelector('.rb-eta').textContent = `${Math.round(p.elapsed_s)} s`;
+  } else {
+    fill.classList.remove('indeterminate');
+    fill.style.width = `${Math.round(100 * p.progress)}%`;
+    bar.querySelector('.rb-eta').textContent = `${Math.round(100 * p.progress)}% · ${rbEta(p.eta_s)}`;
+  }
+  bar.querySelector('.rb-note').textContent = p.note || '';
+  bar.style.display = 'flex';
+}
+
+function rbEta(s) {
+  if (s === null || s === undefined) return '';
+  if (s <= 0) return 'almost done';
+  if (s < 60) return `about ${s} s left`;
+  const m = Math.floor(s / 60);
+  return `about ${m} min ${s % 60 ? `${s % 60} s ` : ''}left`;
+}
+
+async function pollProgress() {
+  if (document.hidden) return;
+  try {
+    const p = await (await fetch('/api/progress', { cache: 'no-store' })).json();
+    showProgress(p);
+    // while something runs, look again soon; otherwise idle along
+    const wait = p.active ? 400 : 1000;
+    if (wait !== rbLast) { clearInterval(rbTimer); rbLast = wait; rbTimer = setInterval(pollProgress, wait); }
+  } catch (e) { /* the server is restarting */ }
+}
+let rbTimer = setInterval(pollProgress, 1000);
+pollProgress();
 </script>
 </body>
 </html>

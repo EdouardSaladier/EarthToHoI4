@@ -93,6 +93,10 @@ class DataNotFoundError(Exception):
     pass
 
 # Allowed output dimensions (either orientation is allowed).
+# `double_size` on render_map multiplies both sides by BIG_MAP_FACTOR (11264 x
+# 4096 = 2x vanilla): maps over ~13.1M px only load in a hoi4.exe patched with
+# the map size unlocker (hoi4_map_size_patcher.py). Every size here, doubled,
+# stays a multiple of 512 (the patched game's tile size) and <= 16384 per side.
 DIMENSIONS = [
     (3584, 3584),
     (3840, 3328),
@@ -102,6 +106,7 @@ DIMENSIONS = [
     (5632, 2304),
     (6400, 2048),
 ]
+BIG_MAP_FACTOR = 2
 
 DEFAULT_MARGIN_PERCENT = 10.0
 BACKGROUND_COLOR = (232, 232, 232)  # light neutral grey for unassigned pixels
@@ -894,24 +899,62 @@ def _overseas_names(regions, is_mainland) -> list:
     return sorted(names)
 
 
-_subdiv_parts_memo = {}   # tag -> {GID_1: [part lon/lat arrays]} (full resolution)
-_subdiv_ring_memo = {}    # tag -> (GID_1 list, level-0 ring -> subdivision index)
-_subdiv_frame_memo = {}   # (tag, excluded, projection, center) -> projected bbox
+_subdiv_parts_memo = {}   # (tag, level) -> {GID_n: [part lon/lat arrays]} (full resolution)
+_subdiv_ring_memo = {}    # (tag, level) -> (GID_n list, level-0 ring -> subdivision index)
+_subdiv_frame_memo = {}   # (tag, excluded, only, projection, center, level) -> projected bbox
+_subdiv_parts_frame_memo = {}   # the same key -> one (area, bbox) per part
+
+# GADM subdivisions are handled at level 1 (regions) and level 2 (counties /
+# departments / council areas -- what the Shetland Islands are): an id says
+# which level it is, so one set of ids can mix them and `subx=` / `subi=`
+# need no second parameter. Level 2 is only read when an id asks for it.
+MAX_SUBDIV_LEVEL = max(ADMIN_SHAPEFILE_NAMES)
 
 
-def list_subdivisions(tag: str) -> list:
-    """A country's GADM level-1 subdivisions: [{"id": GID_1, "name", "type"}]
-    ([] without a level-1 file or subdivisions)."""
-    entry = _admin_reader(1)
+def gid_level(gid: str) -> int:
+    """GADM level of an id: "GBR" 0, "GBR.3_1" 1, "GBR.3.27_1" 2."""
+    return str(gid).split("_")[0].count(".")
+
+
+def _gid_path(gid: str) -> tuple:
+    """An id as a path, comparable across levels: "GBR.3.27_1" ->
+    ("GBR", "3", "27") -- note "GBR.3_1" is *not* a string prefix of it."""
+    return tuple(str(gid).split("_")[0].split("."))
+
+
+def _subdiv_level(*id_sets) -> int:
+    """The finest level the given ids need (1 when there are none)."""
+    return max([gid_level(g) for ids in id_sets for g in (ids or ())] + [1])
+
+
+def _covers(gid: str, ids) -> bool:
+    """True when `gid` is one of `ids`, or lies inside one of them: an id of
+    a coarser level covers its children, so excluding Scotland (GBR.3_1)
+    excludes the Shetland Islands (GBR.3.27_1) with it."""
+    path = _gid_path(gid)
+    return any(path[:len(q)] == q for q in (_gid_path(i) for i in ids))
+
+
+def list_subdivisions(tag: str, level: int = 1) -> list:
+    """A country's GADM subdivisions at `level`: [{"id", "name", "type"}]
+    ([] without that level's file or without subdivisions). At level 2 each
+    one also carries its level-1 "parent" (Shetland Islands -> Scotland)."""
+    if level not in ADMIN_SHAPEFILE_NAMES:
+        return []
+    entry = _admin_reader(level)
     if entry is None or tag not in entry[1]:
         return []
     reader, index = entry
     with _admin_lock:
         recs = [reader.record(i) for i in index[tag]]
-    return [{"id": r["GID_1"], "name": r["NAME_1"], "type": r["ENGTYPE_1"]} for r in recs]
+    out = [{"id": r[f"GID_{level}"], "name": r[f"NAME_{level}"], "type": r[f"ENGTYPE_{level}"]} for r in recs]
+    if level >= 2:
+        for item, r in zip(out, recs):
+            item["parent"] = r[f"NAME_{level - 1}"]
+    return out
 
 
-_subdiv_all_memo = []
+_subdiv_all_memo = {}   # level -> [record tuples], built on the first search
 
 
 def _fold(text: str) -> str:
@@ -920,46 +963,62 @@ def _fold(text: str) -> str:
     return "".join(ch for ch in unicodedata.normalize("NFKD", text or "") if not unicodedata.combining(ch)).lower()
 
 
-def search_subdivisions(query: str, limit: int = 30) -> list:
-    """GADM level-1 subdivisions of every country matching `query` (accent-
-    and case-insensitive, on the name, its alternative names -- VARNAME_1,
-    e.g. "Republic of Karelia" -- and the country name / code): names
-    starting with it first. [{"id", "name", "type", "tag", "country"}]."""
-    entry = _admin_reader(1)
+def search_subdivisions(query: str, limit: int = 30, level: int = 1) -> list:
+    """GADM subdivisions of every country at `level` matching `query`
+    (accent- and case-insensitive, on the name, its alternative names --
+    VARNAME_n, e.g. "Republic of Karelia" -- the parent subdivision at level
+    2, and the country name / code): names starting with it first.
+    [{"id", "name", "type", "tag", "country", "parent" at level 2}].
+
+    The whole level is folded into memory on the first search (level 2 is
+    45,962 records, ~3 s and a few tens of MB), then kept."""
+    if level not in ADMIN_SHAPEFILE_NAMES:
+        return []
+    entry = _admin_reader(level)
     if entry is None:
         return []
-    if not _subdiv_all_memo:
+    if level not in _subdiv_all_memo:
+        fields = ["GID_0", "NAME_0", f"GID_{level}", f"NAME_{level}", f"VARNAME_{level}", f"ENGTYPE_{level}"]
+        if level >= 2:
+            fields.append(f"NAME_{level - 1}")
         with _admin_lock:
-            recs = entry[0].records(fields=["GID_0", "NAME_0", "GID_1", "NAME_1", "VARNAME_1", "ENGTYPE_1"])
+            recs = entry[0].records(fields=fields)
+        rows = []
         for r in recs:
-            _subdiv_all_memo.append((r["GID_1"], r["NAME_1"], r["ENGTYPE_1"], r["GID_0"], r["NAME_0"],
-                                     _fold(r["NAME_1"]), [_fold(v) for v in (r["VARNAME_1"] or "").split("|") if v],
-                                     _fold(r["NAME_0"]), r["GID_0"].lower()))
+            name = r[f"NAME_{level}"]
+            parent = r[f"NAME_{level - 1}"] if level >= 2 else ""
+            rows.append((r[f"GID_{level}"], name, r[f"ENGTYPE_{level}"], r["GID_0"], r["NAME_0"], parent,
+                         _fold(name), [_fold(v) for v in (r[f"VARNAME_{level}"] or "").split("|") if v],
+                         _fold(r["NAME_0"]), r["GID_0"].lower(), _fold(parent)))
+        _subdiv_all_memo[level] = rows
     q = _fold(query.strip())
     if not q:
         return []
     hits = []
-    for gid, name, typ, tag, country, fname, fvars, fcountry, ftag in _subdiv_all_memo:
+    for gid, name, typ, tag, country, parent, fname, fvars, fcountry, ftag, fparent in _subdiv_all_memo[level]:
         if fname.startswith(q):
             rank = 0
         elif q in fname:
             rank = 1
         elif any(q in v for v in fvars):
             rank = 2
-        elif q in fcountry or q == ftag:
+        elif q in fcountry or q == ftag or (fparent and q in fparent):
             rank = 3
         else:
             continue
-        hits.append((rank, fname, {"id": gid, "name": name, "type": typ, "tag": tag, "country": country}))
+        item = {"id": gid, "name": name, "type": typ, "tag": tag, "country": country}
+        if level >= 2:
+            item["parent"] = parent
+        hits.append((rank, fname, item))
     hits.sort(key=lambda x: (x[0], x[1]))
     return [h[2] for h in hits[:limit]]
 
 
-def _subdivision_parts(tag: str) -> dict:
-    """{GID_1: [part (lon, lat) arrays]} for one country, full resolution
-    (read via the .shx index; memoized)."""
-    if tag not in _subdiv_parts_memo:
-        entry = _admin_reader(1)
+def _subdivision_parts(tag: str, level: int = 1) -> dict:
+    """{GID_n: [part (lon, lat) arrays]} for one country at `level`, full
+    resolution (read via the .shx index; memoized)."""
+    if (tag, level) not in _subdiv_parts_memo:
+        entry = _admin_reader(level) if level in ADMIN_SHAPEFILE_NAMES else None
         out = {}
         if entry is not None and tag in entry[1]:
             reader, index = entry
@@ -968,29 +1027,41 @@ def _subdivision_parts(tag: str) -> dict:
                     shp = reader.shape(i)
                     pts = np.asarray(shp.points, dtype=np.float64)
                     parts = list(shp.parts) + [len(pts)]
-                    out[reader.record(i)["GID_1"]] = [pts[a_:b_] for a_, b_ in zip(parts[:-1], parts[1:]) if b_ - a_ >= 3]
-        _subdiv_parts_memo[tag] = out
-    return _subdiv_parts_memo[tag]
+                    out[reader.record(i)[f"GID_{level}"]] = [pts[a_:b_] for a_, b_ in zip(parts[:-1], parts[1:]) if b_ - a_ >= 3]
+        _subdiv_parts_memo[(tag, level)] = out
+    return _subdiv_parts_memo[(tag, level)]
+
+
+# Points per subdivision for the ring -> subdivision KD-tree. Level 1 keeps
+# the original 20,000 (results must not move); at level 2 a country has far
+# more units (GBR 183, FRA 341), so the budget is shared out instead -- a few
+# thousand points per unit is ample to tell which one an island's ring sits on.
+_RING_MASK_POINTS = 20_000
+_RING_MASK_TOTAL = 400_000
 
 
 def subdivision_ring_mask(geometries: dict, tag: str, excluded) -> np.ndarray:
     """Bool per level-0 ring of `tag`: False where the ring lies in an
-    excluded level-1 subdivision (nearest subdivision by majority vote over
-    up to 9 sample vertices -- they share GADM's vertices). A ring spanning
-    several subdivisions (the contiguous USA is one ring) follows the
-    majority, so only islands / exclaves (Hawaii, Corsica) can really be
-    left out of the drawing."""
-    if tag not in _subdiv_ring_memo:
-        parts = _subdivision_parts(tag)
+    excluded subdivision (nearest subdivision by majority vote over up to 9
+    sample vertices -- they share GADM's vertices). A ring spanning several
+    subdivisions (the contiguous USA is one ring) follows the majority, so
+    only islands / exclaves (Hawaii, Corsica, the Shetland Islands) can
+    really be left out of the drawing. `excluded` may mix levels: the level
+    used is the finest one in it, and a coarser id excludes its children."""
+    level = _subdiv_level(excluded)
+    if (tag, level) not in _subdiv_ring_memo:
+        parts = _subdivision_parts(tag, level)
         gids = list(parts)
         rings = geometries[tag]["rings"]
         if len(gids) < 2:
-            _subdiv_ring_memo[tag] = (gids, np.zeros(len(rings), dtype=np.int64))
+            _subdiv_ring_memo[(tag, level)] = (gids, np.zeros(len(rings), dtype=np.int64))
         else:
+            budget = _RING_MASK_POINTS if level <= 1 else max(300, min(_RING_MASK_POINTS,
+                                                                       _RING_MASK_TOTAL // len(gids)))
             pts, lab = [], []
             for gi, g in enumerate(gids):
                 allp = np.concatenate(parts[g])
-                step = max(1, len(allp) // 20000)
+                step = max(1, len(allp) // budget)
                 pts.append(allp[::step])
                 lab.append(np.full(len(pts[-1]), gi))
             tree = cKDTree(_lonlat_to_xyz(np.concatenate(pts)))
@@ -1000,24 +1071,25 @@ def subdivision_ring_mask(geometries: dict, tag: str, excluded) -> np.ndarray:
                 sample = ring[np.linspace(0, len(ring) - 1, min(len(ring), 9)).astype(int)]
                 _d, nearest = tree.query(_lonlat_to_xyz(sample))
                 owner_of[k] = np.bincount(lab[nearest]).argmax()
-            _subdiv_ring_memo[tag] = (gids, owner_of)
-    gids, owner_of = _subdiv_ring_memo[tag]
+            _subdiv_ring_memo[(tag, level)] = (gids, owner_of)
+    gids, owner_of = _subdiv_ring_memo[(tag, level)]
     if not gids:
         return np.ones(len(geometries[tag]["rings"]), dtype=bool)
-    keep = np.array([g not in excluded for g in gids])
+    keep = np.array([not _covers(g, excluded) for g in gids])
     return keep[owner_of]
 
 
 def _subdivision_frame(tag: str, excluded, projection_id: str, center: float, only=None):
     """Projected bbox of a country's kept subdivisions (all of their points:
     exact whatever their shape) -- or of just the `only` ones -- memoized
-    per view."""
-    key = (tag, tuple(sorted(excluded)), tuple(sorted(only or ())), projection_id, center)
+    per view. The level is the finest one `excluded` / `only` name."""
+    level = _subdiv_level(excluded, only)
+    key = (tag, tuple(sorted(excluded)), tuple(sorted(only or ())), projection_id, center, level)
     if key not in _subdiv_frame_memo:
         func = PROJECTIONS[projection_id]["func"]
         xs0, ys0, xs1, ys1 = [], [], [], []
-        for g, parts in _subdivision_parts(tag).items():
-            if g in excluded or (only is not None and g not in only):
+        for g, parts in _subdivision_parts(tag, level).items():
+            if _covers(g, excluded) or (only is not None and not _covers(g, only)):
                 continue
             for part in parts:
                 x, y = func(_continuous_relative_lon(part[:, 0], center), part[:, 1])
@@ -1026,11 +1098,83 @@ def _subdivision_frame(tag: str, excluded, projection_id: str, center: float, on
     return _subdiv_frame_memo[key]
 
 
+def _subdivision_frame_parts(tag: str, excluded, projection_id: str, center: float, only=None):
+    """The same pieces as _subdivision_frame, but one entry per part:
+    [(projected area, x0, y0, x1, y1)] -- so the caller can leave out the
+    ones that paint no land (see _pieces_with_no_land). Memoized per view."""
+    level = _subdiv_level(excluded, only)
+    key = (tag, tuple(sorted(excluded)), tuple(sorted(only or ())), projection_id, center, level)
+    if key not in _subdiv_parts_frame_memo:
+        func = PROJECTIONS[projection_id]["func"]
+        out = []
+        for g, parts in _subdivision_parts(tag, level).items():
+            if _covers(g, excluded) or (only is not None and not _covers(g, only)):
+                continue
+            for part in parts:
+                x, y = func(_continuous_relative_lon(part[:, 0], center), part[:, 1])
+                xy = np.column_stack([x, y])
+                out.append((abs(_signed_area(xy)), float(x.min()), float(y.min()),
+                            float(x.max()), float(y.max())))
+        _subdiv_parts_frame_memo[key] = out
+    return _subdiv_parts_frame_memo[key]
+
+
+def _ring_frame_parts(proj: dict, ring_mask=None):
+    """A projected country's rings as framing pieces [(area, x0, y0, x1, y1)]
+    (every ring when `ring_mask` is None)."""
+    out = []
+    for k, (_is_hole, xy) in enumerate(proj["rings"]):
+        if ring_mask is not None and not ring_mask[k]:
+            continue
+        out.append((abs(_signed_area(xy)), float(xy[:, 0].min()), float(xy[:, 1].min()),
+                    float(xy[:, 0].max()), float(xy[:, 1].max())))
+    return out
+
+
+def _pieces_with_no_land(frame_groups, biggest, land, win_xmin, win_ymin, scale, h, w):
+    """Which framing pieces ended up with no land at all on the finished map
+    -- so they should not have set the frame (user: "cleaned up pixels do
+    not count for the map centering & auto size").
+
+    This is measured on the rendered map rather than guessed from the
+    polygons, because the guess cannot work: Rockall is a 39-point ring that
+    paints nothing, while four sub-pixel islets off Sogn rasterize into one
+    26 px island that survives. Only the raster knows. A group's largest
+    piece is never dropped, so a microstate -- or a country that is one
+    small island -- always keeps its frame."""
+    out = {}
+    for i, g in enumerate(frame_groups):
+        gone = set()
+        for j, (_area, x0, y0, x1, y1) in enumerate(g):
+            if j == biggest[i]:
+                continue
+            c0 = int(math.floor((x0 - win_xmin) * scale)) - 1
+            c1 = int(math.ceil((x1 - win_xmin) * scale)) + 1
+            r0 = int(math.floor(h - (y1 - win_ymin) * scale)) - 1
+            r1 = int(math.ceil(h - (y0 - win_ymin) * scale)) + 1
+            c0, c1 = max(c0, 0), min(c1, w - 1)
+            r0, r1 = max(r0, 0), min(r1, h - 1)
+            if c0 > c1 or r0 > r1 or not land[r0:r1 + 1, c0:c1 + 1].any():
+                gone.add(j)
+        out[i] = gone
+    return out
+
+
+def _group_bbox(parts, dropped):
+    """Union bbox of a framing group's pieces, minus `dropped` indices."""
+    keep = [p for i, p in enumerate(parts) if i not in dropped]
+    if not keep:
+        return None
+    return (min(p[1] for p in keep), min(p[2] for p in keep),
+            max(p[3] for p in keep), max(p[4] for p in keep))
+
+
 def _subdivision_lons(tag: str, excluded, only=None) -> np.ndarray:
     """Longitudes of a country's kept subdivisions -- or of just the `only`
     ones -- (decimated), for choosing the central meridian / seam."""
-    lons = [part[::max(1, len(part) // 400), 0] for g, parts in _subdivision_parts(tag).items()
-            if g not in excluded and (only is None or g in only) for part in parts]
+    level = _subdiv_level(excluded, only)
+    lons = [part[::max(1, len(part) // 400), 0] for g, parts in _subdivision_parts(tag, level).items()
+            if not _covers(g, excluded) and (only is None or _covers(g, only)) for part in parts]
     return np.concatenate(lons) if lons else np.zeros(0)
 
 
@@ -1506,9 +1650,66 @@ def parse_output_size(value):
     return w, h
 
 
-def choose_output_size(bbox_w: float, bbox_h: float, margin_percent: float, output_size=None):
+CROP_SIDES = ("left", "right", "top", "bottom")
+CROP_AXES = (("left", "right"), ("top", "bottom"))
+CROP_STEP_PX = 256       # HOI4 wants map sides in whole 256 px steps -- so are DIMENSIONS
+CROP_MIN_SIDE_PX = 256   # what a crop must leave of each side
+
+
+def normalize_crop(crop):
+    """A forced crop as {left, right, top, bottom} pixels: whole,
+    non-negative, and otherwise free -- balance_crop is what makes the map's
+    sides come out right. `crop` may be None, a dict of some or all sides, or
+    a (left, right, top, bottom) sequence."""
+    if crop is None:
+        values = (0, 0, 0, 0)
+    elif isinstance(crop, dict):
+        unknown = sorted(set(crop) - set(CROP_SIDES))
+        if unknown:
+            raise RenderError(f"Unknown crop side(s) {unknown}: expected {list(CROP_SIDES)}")
+        values = tuple(crop.get(side) or 0 for side in CROP_SIDES)
+    else:
+        values = tuple(crop)
+        if len(values) > len(CROP_SIDES):
+            raise RenderError(f"A crop takes at most {len(CROP_SIDES)} values (left, right, top, bottom)")
+        values += (0,) * (len(CROP_SIDES) - len(values))
+    out = {}
+    for side, value in zip(CROP_SIDES, values):
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise RenderError(f"The {side} crop must be a whole number of pixels")
+        if n != float(value):
+            raise RenderError(f"The {side} crop must be a whole number of pixels")
+        if n < 0:
+            raise RenderError(f"The {side} crop can't be negative")
+        out[side] = n
+    return out
+
+
+def balance_crop(crop):
+    """The crop actually taken, for a crop asked in any whole number of
+    pixels (user). A map's sides have to stay in whole CROP_STEP_PX steps, so
+    what an axis loses is rounded *up* to the next step and **the opposite
+    side makes up the difference**: 156 px off the north takes 100 px off the
+    south with it. Each axis on its own, and nothing is ever given back --
+    the side the user asked for always loses at least what they asked. With
+    both sides of an axis asked for, the make-up goes to the smaller of the
+    two (the right / bottom one when they are equal), which is the same rule:
+    with one side at 0, 0 is the smaller."""
+    crop = dict(crop)
+    for a, b in CROP_AXES:
+        asked = crop[a] + crop[b]
+        pad = -asked % CROP_STEP_PX
+        if pad:
+            crop[b if crop[b] <= crop[a] else a] += pad
+    return crop
+
+
+def choose_output_size(bbox_w: float, bbox_h: float, margin_percent: float, output_size=None, size_factor=1):
     """Pick the output (width, height) -- or use `output_size` if given --
-    then contain-fit the margin-padded bbox into it."""
+    then contain-fit the margin-padded bbox into it. `size_factor` (1 or
+    `BIG_MAP_FACTOR`) multiplies both sides of the chosen size."""
     margin_frac = margin_percent / 100.0
     target_w = bbox_w * (1 + 2 * margin_frac)
     target_h = bbox_h * (1 + 2 * margin_frac)
@@ -1519,6 +1720,7 @@ def choose_output_size(bbox_w: float, bbox_h: float, margin_percent: float, outp
     else:
         out_w, out_h = min(allowed_output_sizes(),
                            key=lambda wh: abs(math.log(wh[0] / wh[1]) - math.log(aspect)))
+    out_w, out_h = out_w * size_factor, out_h * size_factor
 
     scale = min(out_w / target_w, out_h / target_h) * 0.999  # epsilon safety margin
     shown_w = out_w / scale
@@ -1925,21 +2127,99 @@ EDGE_BAND_PX_DEFAULT = 4  # width of each band (sea, land, sea / sea)
 EDGE_BAND_PX_MIN = 2
 EDGE_BAND_PX_MAX = 10
 
+# A world map has no margin -- it fills the full 360 degrees edge to edge --
+# so an island sitting on the seam paints right up against the border and the
+# game, which builds its province adjacency across the wrap, joins it to
+# whatever is on the other side. One column of water on each border is always
+# forced there (user), whatever the edge bands are set to: enough for the
+# wrap's 2x2 check to see water against water, and it costs a single pixel of
+# longitude. The edge bands, where they are on, already contain it.
+WORLD_WRAP_BAND_PX = 1
 
-def _edge_band_masks(h: int, w: int, on: bool, px: int = EDGE_BAND_PX_DEFAULT):
-    """(band, land) bool masks of the edge bands, or (None, None) when off.
-    `band` = every column of the bands, painted sea over whatever the frame
-    shows (the output size doesn't change) before the land/sea steps;
-    `land` = the unowned land strip inside the left band, painted
-    EDGE_LAND_COLOR at the very end (so no step joins it to real land: sea
-    always separates the two)."""
-    if not on:
+
+# --------------------------------------------------------------------------
+# Sea level rise
+# --------------------------------------------------------------------------
+
+# Raising the sea level turns every land pixel at or below the new level
+# into sea, *before* any of the land/sea steps, so lakes, island
+# separation, strait fixing, speck filling and the sieve all clean up the
+# new coastline (user: "the cleanup must happen afterwards").
+#
+# The elevation is the **raw NASA topography** (render_heightmap, the
+# Heightmap tab's source), never the exaggerated HOI4 heights: the
+# exaggeration is cosmetic (it makes the Scandes look like the Alps) and
+# would drown the wrong land. NASA's grey is ~linear at NASA_M_PER_UNIT
+# (~26.5 m) per step and clipped to whole steps, so the rise lands on the
+# nearest step: anything under ~13 m goes at the first one, then in jumps
+# of ~26.5 m. The depth of the water now standing over the drowned land is
+# kept per pixel (debug["drowned_depth"], uint16 metres) -- the bathymetry
+# has no soundings there, it is land to GEBCO (see drowned_depth_m).
+SEA_LEVEL_MAX_M = 8000
+
+
+def drown_land(canvas, hidden_land, poly_labels, view, rise_m):
+    """Drown every land pixel of `canvas` whose real elevation is at or
+    below `rise_m` metres. Modifies canvas / hidden_land / poly_labels in
+    place; returns (report, drowned mask, depth in metres as uint16)."""
+    if not topography_available():
+        raise RenderError("Raising the sea level needs the elevations: download the NASA topography "
+                          "from the Download tab (NASA Topographic Heightmap).")
+    t0 = time.time()
+    rise_m = float(rise_m)
+    grey = np.asarray(render_heightmap({"view": view})[0], dtype=np.float32)
+    land = ~(canvas == np.asarray(BACKGROUND_COLOR, dtype=canvas.dtype)).all(axis=2)
+    if hidden_land is not None:
+        land |= hidden_land
+    land_px = int(land.sum())
+    drowned = land & (grey * NASA_M_PER_UNIT <= rise_m)
+    depth = np.zeros(drowned.shape, dtype=np.uint16)
+    depth[drowned] = np.clip(np.rint(rise_m - grey[drowned] * NASA_M_PER_UNIT), 0, 65535).astype(np.uint16)
+    canvas[drowned] = BACKGROUND_COLOR
+    if hidden_land is not None:
+        hidden_land &= ~drowned
+    if poly_labels is not None:
+        poly_labels[drowned] = 0
+    n = int(drowned.sum())
+    report = {"enabled": True, "sea_level_m": round(rise_m, 1), "drowned_px": n, "land_px_before": land_px,
+              "drowned_share": round(n / land_px, 4) if land_px else 0.0,
+              "step_m": round(NASA_M_PER_UNIT, 1),
+              "max_depth_m": int(depth.max()) if n else 0,
+              "seconds": round(time.time() - t0, 2)}
+    return report, drowned, (depth if n else None)
+
+
+def drowned_depth_m(debug):
+    """Water depth in metres over the land a sea level rise drowned, 0
+    everywhere else (None when nothing drowned). GEBCO reads that land as
+    land -- 0 m deep --, so every depth reading of this frame has to be
+    taken as the larger of the two (see hoi4mod.write_water_colormaps,
+    strategic._add_naval_terrain)."""
+    d = (debug or {}).get("drowned_depth")
+    return None if d is None else np.asarray(d, dtype=np.float32)
+
+
+def _edge_band_masks(h: int, w: int, on: bool, px: int = EDGE_BAND_PX_DEFAULT, world: bool = False):
+    """(band, land) bool masks of the edge bands, or (None, None) when there
+    is nothing to paint. `band` = every column painted sea over whatever the
+    frame shows (the output size doesn't change) before the land/sea steps,
+    and enforced again after; `land` = the unowned land strip inside the left
+    band, painted EDGE_LAND_COLOR at the very end (so no step joins it to
+    real land: sea always separates the two), None when the bands are off.
+    `world` adds WORLD_WRAP_BAND_PX of water to both borders on its own, so
+    a world map never has land against the wrap even with the bands off."""
+    if not on and not world:
         return None, None
     band = np.zeros((h, w), dtype=bool)
-    band[:, :3 * px] = True
-    band[:, -px:] = True
-    land = np.zeros((h, w), dtype=bool)
-    land[:, px:2 * px] = True
+    land = None
+    if on:
+        band[:, :3 * px] = True
+        band[:, -px:] = True
+        land = np.zeros((h, w), dtype=bool)
+        land[:, px:2 * px] = True
+    if world:
+        band[:, :WORLD_WRAP_BAND_PX] = True
+        band[:, -WORLD_WRAP_BAND_PX:] = True
     return band, land
 
 
@@ -1947,7 +2227,8 @@ def render_map(tags, projection_id: str, margin_percent: float = DEFAULT_MARGIN_
                 excluded_tags=None, output_size=None, ignore_overseas=False, land_sea=None, progress=print,
                 color_config=None, merge_autonomous=False, center_tag=None, world=False,
                 include_antarctica=False, edge_bands=False, edge_band_px=EDGE_BAND_PX_DEFAULT, excluded_subdivisions=None,
-                included_subdivisions=None):  # HISTORICAL (shelved, see historical.py): add historical=None
+                included_subdivisions=None, double_size=False, sea_level_m=0, removed_tags=None,
+                crop=None):  # HISTORICAL (shelved, see historical.py): add historical=None
     """Render the map; returns (PIL image, meta dict). `land_sea` is a
     Land/Sea settings dict (see LAND_SEA_DEFAULTS); None loads the saved
     settings (land_sea_settings.json). `color_config` is a colour
@@ -1960,23 +2241,35 @@ def render_map(tags, projection_id: str, margin_percent: float = DEFAULT_MARGIN_
     given, and Antarctica left out unless `include_antarctica`.
     `edge_bands` adds the HOI4 edge bands, each `edge_band_px` wide
     (left: sea, unowned land, sea; right: sea) -- see _edge_band_masks. `excluded_subdivisions` lists GADM
-    level-1 ids (GID_1, e.g. "USA.12_1" = Hawaii): a selected country is
+    level-1 or level-2 ids ("USA.12_1" = Hawaii, "GBR.3.27_1" = the Shetland
+    Islands; the level is read off the id): a selected country is
     then framed on its other subdivisions only, and its parts lying in the
     excluded ones are left out of the map -- sea (see subdivision_ring_mask).
     `included_subdivisions` (GID_1 of countries *not* selected, e.g.
     "RUS.26_1" = Karelia) are added to the framing (Finland + Karelia); their
-    country is drawn as any neighbour. Tags may be empty when some are given."""
+    country is drawn as any neighbour. Tags may be empty when some are given.
+    `double_size` doubles both sides of the output (BIG_MAP_FACTOR): a map
+    for a hoi4.exe patched with the map size unlocker. `sea_level_m` raises
+    the sea by that many metres before the land/sea steps (0 = off, see
+    drown_land). `removed_tags` are countries taken off the map entirely --
+    not drawn, not framed and *not* land either, so their area is plain sea
+    on every tab (`excluded_tags` only hides them: see render_map_detailed).
+    `crop` forces whole 256 px bands off the borders (see normalize_crop),
+    world maps included."""
     # HISTORICAL (shelved, see historical.py): `historical` = id of a
     # historical border map (historical_maps/<id>/): its focus country (1939
     # Poland) gets its historical extent; today's land of that country outside
     # it goes to the nearest other country. Coastlines + other countries: GADM.
     image, meta, _debug = render_map_detailed(tags, projection_id, margin_percent, excluded_tags,
                                               output_size, ignore_overseas, land_sea, progress=progress,
+                                              removed_tags=removed_tags,
                                               color_config=color_config, merge_autonomous=merge_autonomous,
                                               center_tag=center_tag, world=world,
                                               include_antarctica=include_antarctica, edge_bands=edge_bands, edge_band_px=edge_band_px,
                                               excluded_subdivisions=excluded_subdivisions,
-                                              included_subdivisions=included_subdivisions)
+                                              included_subdivisions=included_subdivisions,
+                                              double_size=double_size, sea_level_m=sea_level_m,
+                                              crop=crop)
                                               # HISTORICAL (shelved, see historical.py): historical=historical
     return image, meta
 
@@ -1999,9 +2292,35 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
                         excluded_tags=None, output_size=None, ignore_overseas=False, land_sea=None,
                         progress=print, color_config=None, merge_autonomous=False, center_tag=None,
                         world=False, include_antarctica=False, edge_bands=False, edge_band_px=EDGE_BAND_PX_DEFAULT,
-                        excluded_subdivisions=None, included_subdivisions=None):  # HISTORICAL (shelved, see historical.py): historical=None
+                        excluded_subdivisions=None, included_subdivisions=None, double_size=False,
+                        sea_level_m=0, removed_tags=None, crop=None, _frame_drop=None):  # HISTORICAL (shelved, see historical.py): historical=None
     """render_map, plus the Land/Sea debug masks (None when strait fixing
-    is off) as a third return value."""
+    is off) as a third return value.
+
+    The two ways to take a country off the map differ in what is left behind:
+    `excluded_tags` **hides** it -- it keeps its land (unpainted on the canvas
+    but in `debug["hidden_land"]`, so the land/sea steps, the heightmap, the
+    terrain and the provinces all still see land there, and the export makes
+    it impassable wasteland), which is what keeps a strait a strait.
+    `removed_tags` **removes** it -- nothing of it is drawn, framed or even
+    collected as coastline, so its area is plain sea on every tab, exactly
+    like an excluded subdivision. Known limit, shared with `subx`: a
+    neighbour's border with a removed country is a land border in the GADM
+    topology, so that newly exposed shore is not seen as coastline by strait
+    fixing or island separation.
+
+    `crop` ({left, right, top, bottom} px, any whole number: balance_crop
+    rounds what each axis loses up to a whole CROP_STEP_PX and takes the
+    difference off the opposite side, so 156 px off the top takes 100 px off
+    the bottom with it) forces those bands off the borders, as the render's
+    last step -- after every land/sea step and after the framing, so the crop can
+    never feed back into the frame or into the size it is subtracted from.
+    The whole render is cut with the canvas (the masks in `debug`, the
+    viewport, `to_px`, the legend, the preview markers) and the edge bands
+    are re-laid on the new borders, since a crop can take one clean off and
+    land against the left or right edge crashes the game. It works on a
+    world map too, where a horizontal crop cuts real longitude away: the map
+    then covers less than the full 360 degrees."""
     import palettes  # local import: palettes imports this module
     land_sea = load_land_sea_settings() if land_sea is None else normalize_land_sea(land_sea)
     fix = land_sea["fix_straits"]
@@ -2034,8 +2353,16 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         raise RenderError(f"Unknown projection '{projection_id}'")
     edge_bands = bool(edge_bands)
     edge_band_px = int(edge_band_px)
+    try:
+        sea_level_m = int(sea_level_m or 0)
+    except (TypeError, ValueError):
+        raise RenderError("The sea level rise must be a whole number of metres")
+    if not 0 <= sea_level_m <= SEA_LEVEL_MAX_M:
+        raise RenderError(f"The sea level rise must be 0 to {SEA_LEVEL_MAX_M} m")
     if not EDGE_BAND_PX_MIN <= edge_band_px <= EDGE_BAND_PX_MAX:
         raise RenderError(f"The edge bands must be {EDGE_BAND_PX_MIN} to {EDGE_BAND_PX_MAX} px wide")
+    crop_asked = normalize_crop(crop)
+    crop = balance_crop(crop_asked)
 
     geometries = load_geometries(progress=progress)
     missing = [t for t in tags if t not in geometries]
@@ -2048,6 +2375,13 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         raise RenderError(f"{water} is a water body in GADM (e.g. the Caspian Sea), not a country")
 
     excluded = {t.upper() for t in (excluded_tags or ())}
+    # Removed countries are hidden ones that don't even leave land behind, so
+    # every "not drawn / not framed" rule below applies to them as well; the
+    # drawing loop then skips them outright. A removed country can't frame the
+    # map either, so it leaves the selection here.
+    removed = {t.upper() for t in (removed_tags or ())}
+    excluded |= removed
+    tags = [t for t in tags if t not in removed]
     if world:
         margin_percent = 0.0  # the world map is framed edge to edge
         if not include_antarctica:
@@ -2066,8 +2400,16 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
             if info["overseas_regions"]:
                 overseas[t] = info["overseas_regions"]
 
-    # Excluded GADM level-1 subdivisions, grouped by country (GID_1 starts
-    # with its country's GID_0: "USA.12_1").
+    # Excluded GADM subdivisions, grouped by country (an id starts with its
+    # country's GID_0: "USA.12_1" level 1, "GBR.3.27_1" level 2 -- the two
+    # may be mixed, each id says which level it is).
+    _known_memo = {}
+
+    def known_ids(t, lv):
+        if (t, lv) not in _known_memo:
+            _known_memo[(t, lv)] = {sd["id"] for sd in list_subdivisions(t, lv)}
+        return _known_memo[(t, lv)]
+
     sub_excluded = {}
     for gid in excluded_subdivisions or ():
         gid = str(gid).strip()
@@ -2076,12 +2418,13 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
     for t, ex in sub_excluded.items():
         if t not in geometries:
             raise RenderError(f"Unknown country for subdivision(s) {sorted(ex)}")
-        known = {sd["id"] for sd in list_subdivisions(t)}
-        unknown = ex - known
+        unknown = sorted(g for g in ex if g not in known_ids(t, gid_level(g)))
         if unknown:
-            raise RenderError(f"Unknown subdivision(s) {sorted(unknown)}")
-        if t in tags and not (known - ex):
-            raise RenderError(f"Every subdivision of {t} is excluded: keep at least one (or unselect the country)")
+            raise RenderError(f"Unknown subdivision(s) {unknown}")
+        if t in tags:
+            known = known_ids(t, _subdiv_level(ex))
+            if known and not [g for g in known if not _covers(g, ex)]:
+                raise RenderError(f"Every subdivision of {t} is excluded: keep at least one (or unselect the country)")
     sub_focus = {t: ex for t, ex in sub_excluded.items() if t in tags}
     lon_override = {t: _subdivision_lons(t, ex) for t, ex in sub_focus.items()}
     # Included subdivisions of countries that aren't selected: extra framing.
@@ -2090,7 +2433,7 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         t = gid.split(".")[0].upper()
         if t not in geometries:
             raise RenderError(f"Unknown country for subdivision '{gid}'")
-        if gid not in {sd["id"] for sd in list_subdivisions(t)}:
+        if gid not in known_ids(t, gid_level(gid)):
             raise RenderError(f"Unknown subdivision '{gid}'")
         if t not in tags:  # a selected country already frames all of its subdivisions
             sub_included.setdefault(t, set()).add(gid)
@@ -2107,29 +2450,36 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         central_meridian = _central_meridian_for(geometries, tags, ring_masks, lon_override)
     func = PROJECTIONS[projection_id]["func"]
     world_half_w = float(func(np.array([180.0]), np.array([0.0]))[0][0])  # widest point of the world
-    colors, _nudged = palettes.effective_colors(geometries, color_config)
+    # Drawn in the fixed colours (assign_colors), whatever the colour
+    # configuration: the configured ones are applied afterwards (recolor_render).
+    colors = assign_colors(geometries)
     # Merged autonomous territories are drawn in, and counted as, their
     # country; hiding the country hides them too.
     parent_of = {c: p for c, p in palettes.AUTONOMOUS_PARENT.items()
                  if merge_autonomous and c in geometries and p in geometries}
     owner = lambda t: parent_of.get(t, t)
+    removed |= {c for c, p in parent_of.items() if p in removed}
     excluded |= {c for c, p in parent_of.items() if p in excluded}
 
     # The viewport is framed around the union of every selected country's
     # bbox, so picking several countries widens (or repositions) the view to
     # fit all of them rather than just the first one.
     focus_projs = {t: get_projected_country(geometries, t, projection_id, central_meridian) for t in tags}
-    frame_bboxes = []
+    # The frame is built from *groups* of pieces (one group per country or
+    # per subdivision selection), each piece carrying its projected area, so
+    # the pieces the land/sea steps would erase can be left out below.
+    frame_groups = []
     if world:
         # Every country that will be drawn (hidden ones excluded, so hiding
         # Antarctica tightens the frame), clipped to the world outline below.
         for t in geometries:
             if t not in WATER_TAGS and t not in excluded:
-                frame_bboxes.append(get_projected_country(geometries, t, projection_id, central_meridian)["bbox"])
+                frame_groups.append(_ring_frame_parts(
+                    get_projected_country(geometries, t, projection_id, central_meridian)))
     for t, only in ([] if world else sub_included.items()):
-        fb = _subdivision_frame(t, (), projection_id, central_meridian, only)
-        if fb is not None:
-            frame_bboxes.append(fb)
+        g = _subdivision_frame_parts(t, (), projection_id, central_meridian, only)
+        if g:
+            frame_groups.append(g)
     for t, p in ([] if world else focus_projs.items()):
         # HISTORICAL (shelved, see historical.py):
         # if hmap is not None and t == hmap["focus_tag"]:
@@ -2138,34 +2488,47 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         #     continue
         if t in sub_focus:
             # Subdivision choice overrides "ignore overseas" for this country.
-            fb = _subdivision_frame(t, sub_focus[t], projection_id, central_meridian)
-            if fb is not None:
-                frame_bboxes.append(fb)
+            g = _subdivision_frame_parts(t, sub_focus[t], projection_id, central_meridian)
+            if g:
+                frame_groups.append(g)
                 continue
-        kept = [xy for k, (_is_hole, xy) in enumerate(p["rings"]) if ring_masks is not None and ring_masks[t][k]]
-        if not kept:
-            frame_bboxes.append(p["bbox"])
-            continue
-        frame_bboxes.append((min(float(xy[:, 0].min()) for xy in kept), min(float(xy[:, 1].min()) for xy in kept),
-                             max(float(xy[:, 0].max()) for xy in kept), max(float(xy[:, 1].max()) for xy in kept)))
-    if not frame_bboxes:
-        raise RenderError("Nothing to frame: every country is hidden")
-    # A focus country cut by a user-chosen seam extends past the world edge
-    # once unwrapped; frame only what's inside the world outline.
-    fxmin = max(min(b[0] for b in frame_bboxes), -world_half_w)
-    fymin = min(b[1] for b in frame_bboxes)
-    fxmax = min(max(b[2] for b in frame_bboxes), world_half_w)
-    fymax = max(b[3] for b in frame_bboxes)
-    if center_tag and not world:
-        # Centre on the chosen country (x = 0 at the central meridian).
-        half = min(max(-fxmin, fxmax), world_half_w)
-        fxmin, fxmax = -half, half
-    bbox_w = fxmax - fxmin
-    bbox_h = fymax - fymin
-    if bbox_w <= 0 or bbox_h <= 0:
-        raise RenderError(f"Degenerate geometry for {tags}")
+        g = _ring_frame_parts(p, ring_masks[t] if ring_masks is not None else None)
+        frame_groups.append(g or _ring_frame_parts(p))
+    frame_groups = [g for g in frame_groups if g]
+    if not frame_groups:
+        raise RenderError("Nothing to frame: every country is hidden or removed")
 
-    out_w, out_h, scale, shown_w, shown_h = choose_output_size(bbox_w, bbox_h, margin_percent, output_size)
+    # Land the cleanup erases must not set the frame or the centring (user).
+    # The catch is circular -- which pieces survive depends on the scale, and
+    # the scale on the frame -- so this iterates: the first pass frames
+    # frame on everything; the second pass (below) reframes on what survived.
+    biggest = [max(range(len(g)), key=lambda i: g[i][0]) for g in frame_groups]
+
+    def _frame_for(drop):
+        """(fxmin, fymin, fxmax, fymax) + choose_output_size, for one choice
+        of dropped pieces."""
+        bbs = [b for b in (_group_bbox(g, drop[i]) for i, g in enumerate(frame_groups)) if b is not None]
+        # A focus country cut by a user-chosen seam extends past the world edge
+        # once unwrapped; frame only what's inside the world outline.
+        x0 = max(min(b[0] for b in bbs), -world_half_w)
+        y0 = min(b[1] for b in bbs)
+        x1 = min(max(b[2] for b in bbs), world_half_w)
+        y1 = max(b[3] for b in bbs)
+        if center_tag and not world:
+            # Centre on the chosen country (x = 0 at the central meridian).
+            half = min(max(-x0, x1), world_half_w)
+            x0, x1 = -half, half
+        if x1 - x0 <= 0 or y1 - y0 <= 0:
+            raise RenderError(f"Degenerate geometry for {tags}")
+        return (x0, y0, x1, y1) + choose_output_size(x1 - x0, y1 - y0, margin_percent, output_size,
+                                                     BIG_MAP_FACTOR if double_size else 1)
+
+    frame_drop = _frame_drop if _frame_drop is not None else {i: set() for i in range(len(frame_groups))}
+    fxmin, fymin, fxmax, fymax, out_w, out_h, scale, shown_w, shown_h = _frame_for(frame_drop)
+    bbox_w, bbox_h = fxmax - fxmin, fymax - fymin
+    frame_report = {"pass": 2 if _frame_drop is not None else 1,
+                    "dropped_pieces": sum(len(d) for d in frame_drop.values()),
+                    "pieces": sum(len(g) for g in frame_groups)}
 
     cx = (fxmin + fxmax) / 2.0
     cy = (fymin + fymax) / 2.0
@@ -2196,7 +2559,7 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
     border_seg, neighbour_rings = [], []
     next_label = 1
     for other_tag, data in geometries.items():
-        if other_tag in WATER_TAGS:
+        if other_tag in WATER_TAGS or other_tag in removed:
             continue
         if other_tag in excluded and not need_hidden:
             continue
@@ -2317,13 +2680,27 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
     # Edge bands: all sea before the land/sea steps, so they treat them as
     # sea (coasts, islands, straits); enforced again at the end, then the
     # unowned land strip is painted in.
-    band, edge_land = _edge_band_masks(out_h, out_w, edge_bands, edge_band_px)
+    band, edge_land = _edge_band_masks(out_h, out_w, edge_bands, edge_band_px, world)
     if band is not None:
         canvas[band] = BACKGROUND_COLOR
         if hidden_land is not None:
             hidden_land &= ~band
         if poly_labels is not None:
             poly_labels[band] = 0
+
+    # Sea level rise before every land/sea step, so they clean up the new
+    # coastline (user: "the cleanup must happen afterwards").
+    sea_level_report = {"enabled": False}
+    drowned = drowned_depth = None
+    if sea_level_m > 0:
+        sea_level_report, drowned, drowned_depth = drown_land(
+            canvas, hidden_land, poly_labels,
+            {"projection": projection_id, "center": central_meridian, "win_xmin": win_xmin,
+             "win_ymin": win_ymin, "scale": scale, "width": out_w, "height": out_h},
+            sea_level_m)
+        progress(f"  sea level +{sea_level_m} m: {sea_level_report['drowned_px']:,} px drowned "
+                 f"({sea_level_report['drowned_share'] * 100:.1f}% of the land) "
+                 f"in {sea_level_report['seconds']:.1f}s")
 
     # Lakes first: every later step then sees them as water (islands in a
     # lake are islands, specks/diagonals/sieve respect lake shores), except
@@ -2439,7 +2816,8 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
             hidden_land &= ~band
         if lake_mask is not None:
             lake_mask &= ~band
-    if micro_on or sieve or island_ops or specks or connect or band is not None:  # HISTORICAL: ... or hmap is not None
+    if (micro_on or sieve or island_ops or specks or connect or band is not None
+            or drowned is not None):  # HISTORICAL: ... or hmap is not None
         # Steps above can add (microstates) or remove countries: recount.
         counts = np.bincount(_country_index(canvas, view_colors).ravel(), minlength=len(view_tags) + 1)
         visible = [t for i, t in enumerate(view_tags) if counts[i + 1] > 0]
@@ -2479,22 +2857,150 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         lakes_report["lakes"] = int(ndimage.label(lake_final, structure=_CONNECTIVITY_4)[1])
     if edge_land is not None:
         canvas[edge_land] = EDGE_LAND_COLOR
+    if drowned is not None:
+        # The cleanup runs on the new coastline and may hand a few of the
+        # drowned pixels back to the land (a speck of sea filled in, an
+        # islet grown, a diagonal bridged). Those are land again, so they
+        # leave the drowned mask: their people are not lost (states.py) and
+        # the bathymetry gets no depth over them (drowned_depth_m).
+        back = drowned & ~(canvas == np.asarray(BACKGROUND_COLOR, dtype=canvas.dtype)).all(axis=2)
+        if lake_final is not None:
+            back &= ~lake_final
+        if hidden_land is not None:
+            back |= drowned & hidden_land
+        n_back = int(back.sum())
+        if n_back:
+            drowned &= ~back
+            drowned_depth[back] = 0
+            sea_level_report["reclaimed_px"] = n_back
+            sea_level_report["drowned_px"] -= n_back
+        if not drowned.any():
+            drowned = drowned_depth = None
+    # Second framing pass: anything the land/sea steps rubbed out (or that
+    # never painted a pixel) must not have counted for the frame or the
+    # centring, so reframe on what is actually on the map and draw it again.
+    # Only pieces with no land at all are dropped, so nothing visible is ever
+    # framed out; one extra pass at most, and none at all when the frame does
+    # not move (the measurement itself is a few bbox tests).
+    if _frame_drop is None and not world:
+        land_now = ~(canvas == np.asarray(BACKGROUND_COLOR, dtype=canvas.dtype)).all(axis=2)
+        if hidden_land is not None:
+            land_now |= hidden_land
+        if lake_final is not None:
+            land_now &= ~lake_final
+        if edge_land is not None:
+            land_now &= ~edge_land
+        drop2 = _pieces_with_no_land(frame_groups, biggest, land_now, win_xmin, win_ymin, scale, out_h, out_w)
+        again = _frame_for(drop2) if any(drop2.values()) else None
+        # Worth drawing again only for a different output size or a real gain
+        # in scale: dropping one sub-pixel islet often moves the frame by a
+        # hair, which would cost a second render for nothing.
+        if again is not None and (again[4:6] != (out_w, out_h) or again[6] > scale * (1.0 + FRAME_MIN_GAIN)):
+            return render_map_detailed(
+                tags, projection_id, margin_percent, excluded_tags, output_size, ignore_overseas, land_sea,
+                progress=progress, color_config=color_config, merge_autonomous=merge_autonomous,
+                center_tag=center_tag, world=world, include_antarctica=include_antarctica,
+                edge_bands=edge_bands, edge_band_px=edge_band_px,
+                excluded_subdivisions=excluded_subdivisions, included_subdivisions=included_subdivisions,
+                double_size=double_size, sea_level_m=sea_level_m, removed_tags=removed_tags,
+                crop=crop_asked, _frame_drop=drop2)  # the ask, not the balanced crop: it is reported
+
+    # Forced crop (user): cut whole 256 px bands off the chosen borders, as
+    # the last thing the render does. Taken here, after every land/sea step
+    # and after the framing has had its say, a cropped-away piece can never
+    # move the frame or change the size the crop is subtracted from, so the
+    # output is simply the map above minus those bands -- `scale` and the
+    # position of everything left never change. The whole render is cut with
+    # the canvas (every mask in `debug`, the viewport, the pixel transform,
+    # the legend, the preview markers), so each tab sees the cropped map and
+    # nothing downstream knows the difference.
+    base_w, base_h = out_w, out_h
+    if any(crop.values()):
+        out_w -= crop["left"] + crop["right"]
+        out_h -= crop["top"] + crop["bottom"]
+        if out_w < CROP_MIN_SIDE_PX or out_h < CROP_MIN_SIDE_PX:
+            raise RenderError(
+                f"The crop leaves too little of this {base_w} x {base_h} map "
+                f"({crop['left']} + {crop['right']} px across, {crop['top']} + {crop['bottom']} px down"
+                + (", once rounded up to whole 256 px steps" if crop != crop_asked else "")
+                + f"): keep at least {CROP_MIN_SIDE_PX} px each way")
+        r0, c0 = crop["top"], crop["left"]
+        r1, c1 = base_h - crop["bottom"], base_w - crop["right"]
+
+        def _cut(a):
+            """Anything shaped like the canvas follows it; everything else
+            (counts, reports, lon/lat segments) is left as it is."""
+            if isinstance(a, np.ndarray) and a.shape[:2] == (base_h, base_w):
+                return np.ascontiguousarray(a[r0:r1, c0:c1])
+            return a
+
+        canvas = _cut(canvas)
+        hidden_land, lake_final, lakes_drawn = _cut(hidden_land), _cut(lake_final), _cut(lakes_drawn)
+        drowned, drowned_depth = _cut(drowned), _cut(drowned_depth)
+        debug = {k: _cut(v) for k, v in (debug or {}).items()}
+        win_xmin += crop["left"] / scale
+        win_xmax -= crop["right"] / scale
+        win_ymin += crop["bottom"] / scale
+        win_ymax -= crop["top"] / scale
+        shown_w, shown_h = out_w / scale, out_h / scale
+        to_px = _ToPx(projection_id, central_meridian, win_xmin, win_ymin, scale, out_h)
+        # The edge bands have to end up on the *new* borders: a crop can take
+        # one clean off, and land against the left or right edge crashes the
+        # game (see the HOI4 mod tab). They are painted over whatever is
+        # there, as they always are; the one thing lost is that the strip they
+        # now cover did not go through the land/sea steps as a border.
+        band, edge_land = _edge_band_masks(out_h, out_w, edge_bands, edge_band_px, world)
+        if band is not None:
+            canvas[band] = BACKGROUND_COLOR
+            if hidden_land is not None:
+                hidden_land &= ~band
+            if lake_final is not None:
+                lake_final &= ~band
+            if drowned is not None:
+                drowned &= ~band
+                drowned_depth[band] = 0
+            if edge_land is not None:
+                canvas[edge_land] = EDGE_LAND_COLOR
+        # A country, or drowned land, left only in the cut-away bands is no
+        # longer on the map.
+        counts = np.bincount(_country_index(canvas, view_colors).ravel(), minlength=len(view_tags) + 1)
+        visible = [t for i, t in enumerate(view_tags) if counts[i + 1] > 0]
+        if drowned is not None:
+            sea_level_report["drowned_px"] = int(drowned.sum())
+            if not sea_level_report["drowned_px"]:
+                drowned = drowned_depth = None
+        # The Land/Sea preview's markers are pixel coordinates of the map the
+        # steps ran on: move them with the crop, and drop the ones it cut off.
+        land_sea_report["straits"] = [
+            dict(st, x=st["x"] - c0, y=st["y"] - r0) for st in land_sea_report.get("straits", [])
+            if c0 <= st["x"] < c1 and r0 <= st["y"] < r1]
+        if "blocked_px" in land_sea_report:
+            land_sea_report["blocked_px"] = [
+                [round(x - c0, 1), round(y - r0, 1)] for x, y in land_sea_report["blocked_px"]
+                if c0 <= x < c1 and r0 <= y < r1]
+
     # to_px: lon/lat -> pixel; view: the pixel frame, for overlays (render_rivers)
     # lakes_drawn: every HydroLAKES lake rasterized on land, incl. those too
     # small to keep (or dropped later) -- the Terrain tab turns the ones that
     # ended up as land into marsh.
     # edge_land: the unowned land strip of the edge bands (None when off).
+    # drowned / drowned_depth: the land a sea level rise turned into sea and
+    # the metres of water now over it (None when the rise is off) -- the
+    # population there is lost (states.py) and the bathymetry has no
+    # soundings for it (drowned_depth_m).
     debug = dict(debug or {}, to_px=to_px, lakes=lake_final, lakes_drawn=lakes_drawn, hidden_land=hidden_land,
-                 edge_land=edge_land,
+                 edge_land=edge_land, drowned=drowned, drowned_depth=drowned_depth,
+                 sea_level_m=sea_level_report.get("sea_level_m"),
                  country_rgb={t: tuple(int(v) for v in colors[owner(t)]) for t in geometries if t in colors},
                  view={"projection": projection_id, "center": central_meridian, "win_xmin": win_xmin,
                        "win_ymin": win_ymin, "scale": scale, "width": out_w, "height": out_h})
     land_sea_report["separation"] = separation_report
     land_sea_report["lakes"] = lakes_report
+    land_sea_report["sea_level"] = sea_level_report
 
     image = Image.fromarray(canvas, mode="RGB")
 
-    return image, {
+    meta = {
         "tags": tags,
         "countries": [{"tag": t, "name": geometries[t]["name"]} for t in tags],
         "projection": projection_id,
@@ -2502,19 +3008,26 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         "width": out_w,
         "height": out_h,
         "size_mode": "auto" if output_size is None else "manual",
+        "double_size": bool(double_size),
         "margin_percent": margin_percent,
         "ignore_overseas": bool(ignore_overseas),
         "overseas_regions": [
             {"tag": t, "name": geometries[t]["name"], "regions": names} for t, names in overseas.items()
         ],
         "central_meridian": central_meridian,
-        "excluded_countries": sorted(excluded),
+        "excluded_countries": sorted(excluded - removed),
+        "removed_countries": sorted(removed),
+        "crop": dict(crop),
+        "crop_asked": dict(crop_asked),
+        "uncropped_size": [base_w, base_h],
         "merge_autonomous": bool(merge_autonomous),
         "center_country": center_tag,
         "world": bool(world),
         "include_antarctica": bool(include_antarctica),
         "edge_bands": edge_bands,
         "edge_band_px": edge_band_px,
+        "sea_level_m": sea_level_m,
+        "framing": frame_report,
         "excluded_subdivisions": sorted(g for ex in sub_excluded.values() for g in ex),
         "included_subdivisions": sorted(g for inc in sub_included.values() for g in inc),
         "autonomous_territories": {c: p for c, p in palettes.AUTONOMOUS_PARENT.items() if c in geometries},
@@ -2524,7 +3037,53 @@ def render_map_detailed(tags, projection_id: str, margin_percent: float = DEFAUL
         ],
         "land_sea": land_sea_report,
         # "historical": historical_report,  # HISTORICAL (shelved)
-    }, debug
+    }
+    if color_config is False:  # the render in assign_colors' fixed colours (the app recolours it)
+        return image, meta, debug
+    return recolor_render(image, meta, debug, color_config)[:3]
+
+
+def recolor_pairs(debug, color_config=None):
+    """{fixed colour: configured colour} for a render drawn in assign_colors'
+    colours (render_map_detailed(color_config=False)), + {tag: configured
+    colour} (debug["country_rgb"] of the recoloured render) and the
+    effective colours. `color_config` None = the active configuration."""
+    import palettes  # local import: palettes imports this module
+    geometries = load_geometries()
+    eff, _nudged = palettes.effective_colors(geometries, color_config)
+    tag_of = {tuple(c): t for t, c in assign_colors(geometries).items()}
+    country_rgb = {t: tuple(int(v) for v in eff[tag_of[tuple(c)]]) for t, c in debug["country_rgb"].items()}
+    pairs = {tuple(c): country_rgb[t] for t, c in debug["country_rgb"].items()}
+    return pairs, country_rgb, eff
+
+
+def recolor_image(image, pairs):
+    """`image` with every colour in `pairs` replaced by its value (one pass,
+    so a colour that is both a source and a target can't be mapped twice)."""
+    src = [(k, v) for k, v in pairs.items() if k != v]
+    if not src:
+        return image.copy()
+    arr = np.asarray(image)
+    key = (arr[..., 0].astype(np.uint32) << 16) | (arr[..., 1].astype(np.uint32) << 8) | arr[..., 2]
+    lut = np.full(1 << 24, -1, dtype=np.int16)
+    lut[[(r << 16) | (g << 8) | b for (r, g, b), _v in src]] = np.arange(len(src), dtype=np.int16)
+    ix = lut[key]
+    hit = ix >= 0
+    out = arr.copy()
+    out[hit] = np.array([v for _k, v in src], dtype=np.uint8)[ix[hit]]
+    return Image.fromarray(out, mode="RGB")
+
+
+def recolor_render(image, meta, debug, color_config=None):
+    """Country colours as post-processing: a render made in the fixed colours
+    (color_config=False) -> the colour configuration's (image, legend,
+    debug["country_rgb"]), so a colour change never re-renders the map.
+    Returns (image, meta, debug, pairs); `pairs` recolours other images
+    made from that render (recolor_image)."""
+    pairs, country_rgb, eff = recolor_pairs(debug, color_config)
+    meta = dict(meta, visible_countries=[dict(c, color=rgb_to_hex(eff[c["tag"]]))
+                                         for c in meta["visible_countries"]])
+    return recolor_image(image, pairs), meta, dict(debug, country_rgb=country_rgb), pairs
 
 
 def list_countries():
@@ -2614,6 +3173,8 @@ _LAND_SEA_LIMITS = {
     "max_strait_length_px": (1, 1000),
     "subpixel_rows": (2, 32),
 }
+# Smallest gain in scale worth a second framing pass (see render_map_detailed).
+FRAME_MIN_GAIN = 0.005
 BLOCK_RADIUS_PX = 4
 CHANNEL_SNAP_PX = 12  # manual channel ends extend to water this close
 
@@ -3457,6 +4018,7 @@ def fix_straits(canvas, hidden_land, seg, seg_lonlat, settings, channels_px, blo
 # --------------------------------------------------------------------------
 PREVIEW_COLORS = {
     "sea": (52, 99, 153),
+    "drowned": (21, 101, 92),
     "lake": (129, 199, 245),
     "land": (214, 209, 196),
     "hidden": (160, 156, 146),
@@ -3504,6 +4066,8 @@ def land_sea_preview(image: Image.Image, meta: dict, debug) -> Image.Image:
     out[water] = PREVIEW_COLORS["sea"]
     if debug is not None and debug.get("lakes") is not None:
         out[debug["lakes"]] = PREVIEW_COLORS["lake"]
+    if debug is not None and debug.get("drowned") is not None:
+        out[debug["drowned"]] = PREVIEW_COLORS["drowned"]
     if debug is not None:
         if "hidden" in debug:
             out[debug["hidden"] & ~debug["water"]] = PREVIEW_COLORS["hidden"]

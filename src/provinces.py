@@ -60,11 +60,24 @@ PROVINCE_DEFAULTS = {"land_min": 100, "land_max": 900, "sea_min": 1200, "sea_max
                      "city_provinces": 0,     # 1 = the City tab's cities get provinces following the urban terrain
                      "city_classes": 3,       # ... cities of classes 1..this
                      "city_min_px": 20}       # ... grown to at least this (within their state)
+# The game's province border limit (hardcoded in hoi4.exe): it draws at most
+# 65,535 border segments -- one per pair of neighbouring provinces --, and
+# past that province borders stop being drawn over large parts of the map
+# (reported by the user on a 35,188-province map: 102,999 pairs). Maps made
+# here have ~2.93 pairs per province, so the ceiling is ~22,000 provinces,
+# whatever the map's size: the limit is a count, not a resolution. Over it,
+# the smallest land pairs are merged until under (`_cap_borders`, the
+# target-count trim's rules), and the target number can't be set above it.
+GAME_MAX_BORDERS = 65_536
+BORDER_LIMIT = 65_000             # aimed at: the steps after the cap may add a few borders back
+BORDER_CAP_ROUNDS = 10
+BORDERS_PER_PROVINCE = 2.93       # measured on every map made here, and on the user's other mods
+MAX_PROVINCES = int(GAME_MAX_BORDERS / BORDERS_PER_PROVINCE)   # ~22,367
 PROVINCE_LIMITS = {"land_min": (4, 1_000_000), "land_max": (4, 1_000_000), "sea_min": (4, 1_000_000),
                    "sea_max": (4, 1_000_000), "density_factor": (1, 20), "density_dense_factor": (1, 20),
                    "density_ref": (1, 100_000),
                    "sea_far_factor": (1, 20), "river_split_px": (0, 1_000_000),
-                   "target_count": (0, 1_000_000), "city_provinces": (0, 1), "city_classes": (1, 8),
+                   "target_count": (0, MAX_PROVINCES), "city_provinces": (0, 1), "city_classes": (1, 8),
                    "city_min_px": (20, 100_000)}
 SETTING_UNITS = {"target_count": "", "city_provinces": "", "city_classes": "", "density_factor": "",
                  "density_dense_factor": "", "density_ref": "", "sea_far_factor": ""}
@@ -246,6 +259,40 @@ def _pair_borders(P, valid=None):
         for x, y, c in zip((keys // big).tolist(), (keys % big).tolist(), cnt.tolist()):
             out[(x, y)] = out.get((x, y), 0) + c
     return out
+
+
+def border_count(P):
+    """Neighbouring province pairs (side contact, ids > 0), the map's wrap
+    (last column / first column) included = the border segments the game
+    draws, see GAME_MAX_BORDERS."""
+    n = int(P.max()) + 1
+    keys = []
+    for a, b in ((P[:, :-1], P[:, 1:]), (P[:-1, :], P[1:, :]), (P[:, -1:], P[:, :1])):
+        m = (a != b) & (a > 0) & (b > 0)
+        lo, hi = np.minimum(a[m], b[m]).astype(np.int64), np.maximum(a[m], b[m]).astype(np.int64)
+        keys.append(lo * n + hi)
+    return int(len(np.unique(np.concatenate(keys))))
+
+
+def _cap_borders(P, ptype, group, protect, river, limit=BORDER_LIMIT):
+    """Merge the smallest land pairs until the map is under the game's border
+    limit (see GAME_MAX_BORDERS). Returns (merges, borders before, borders
+    now). A merge removes `BORDERS_PER_PROVINCE` borders on average (the
+    province's own: its pair with the kept one, and the ones they shared) --
+    measured 2.98 on a map merged from 87,655 to 53,906 borders --, and the
+    rounds re-measure, so the count lands just under the limit instead of
+    well below it (every merge past it is a province lost for nothing)."""
+    before = now = border_count(P)
+    merges = 0
+    for _ in range(BORDER_CAP_ROUNDS):
+        if now <= limit:
+            break
+        got = _trim_to_count(P, ptype, group, max(1, int((now - limit) / BORDERS_PER_PROVINCE)), protect, river)
+        if not got:
+            break
+        merges += got
+        now = border_count(P)
+    return merges, before, now
 
 
 def _organic_labels(m, ys, xs, lab, parts, cost):
@@ -2392,13 +2439,14 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
     aim_land = None
     passes = []
     sea_est = lake_est = model1 = None
-    if s["target_count"]:
+    want_count = s["target_count"]   # not `target`: that is the province size below
+    if want_count:
         sea_est = sea_rep["count"]
         # lakes: one province each; under MIN_PROVINCE_PX they become land
         lab_, nl_ = ndimage.label(lakes, structure=CROSS)
         lake_est = int((np.bincount(lab_.ravel(), minlength=nl_ + 1)[1:] >= MIN_PROVINCE_PX).sum())
         del lab_
-        aim_land = max(int(round((s["target_count"] - sea_est - lake_est) * (1 + TARGET_BIAS))), 1)
+        aim_land = max(int(round((want_count - sea_est - lake_est) * (1 + TARGET_BIAS))), 1)
         # first guess: one province per target size (density-scaled per pixel)
         if density_img is not None:
             fpx = np.clip(np.sqrt(s["density_ref"] / np.maximum(density_img[land], 1e-3)),
@@ -2732,12 +2780,18 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
     # target count: the topology adds provinces (sea +5-7%, land +2-5% away
     # from Europe): merge small land pairs down to the target
     trimmed = 0
-    if s["target_count"]:
+    if want_count:
         total_now = int(len(np.unique(P[P > 0])))
-        if total_now > s["target_count"]:
-            trimmed = _trim_to_count(P, ptype, group, total_now - s["target_count"],
+        if total_now > want_count:
+            trimmed = _trim_to_count(P, ptype, group, total_now - want_count,
                                      _protected(P, city_mask) if city_mask is not None else frozenset(),
                                      (np.asarray(rivers) <= 11) if rivers is not None else None)
+    # the game's border limit (hardcoded): merge the smallest land pairs
+    # until under it, else province borders stop being drawn on the map
+    border_merges, borders_before, _b = _cap_borders(
+        P, ptype, group,
+        _protected(P, city_mask) if city_mask is not None else frozenset(),
+        (np.asarray(rivers) <= 11) if rivers is not None else None)
     timings["trim"] = round(time.time() - t0, 2)
     pstate += [0] * (len(ptype) - len(pstate))
     topo["split_tall"] = _split_tall(P, ptype, group, pstate)
@@ -2789,11 +2843,19 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
         report_spans = int((np.bincount(u // (int(stl.max()) + 1)) > 1).sum())
     else:
         report_spans = 0
-    # coastal: land touching sea / sea touching land (side contact)
+    # coastal: land touching sea / sea touching land (side contact).
+    # **The map wraps**: the game builds its own coastality from the bitmap,
+    # last column against the first, and prefers it over this column
+    # ("Bitmap and province definition disagree on whether or not province N
+    # is coastal"). A land province it calls coastal with no port building
+    # then crashes the game on start ("is setup as coastal but has no port
+    # building in the nudger"; the user's France map, edge bands off: 96 of
+    # them). So the wrap pair counts here exactly as the game counts it --
+    # and `hoi4mod` writes those provinces' ports from the same contacts.
     coastal = np.zeros(n + 1, dtype=bool)
-    for dy, dx in ((0, 1), (1, 0)):
-        a_ = P[: h - dy, : w - dx]
-        b_ = P[dy:, dx:]
+    pairs = [(P[: h - dy, : w - dx], P[dy:, dx:]) for dy, dx in ((0, 1), (1, 0))]
+    pairs.append((P[:, w - 1], P[:, 0]))  # the map's wrap
+    for a_, b_ in pairs:
         ta, tb = ptype_new[a_], ptype_new[b_]
         m = (a_ != b_) & (((ta == LAND) & (tb == SEA)) | ((ta == SEA) & (tb == LAND)))
         coastal[a_[m]] = True
@@ -2950,7 +3012,7 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
     report["settings"] = {k: v for k, v in s.items()}
     report["target_px"] = round(target)
     target_note = None
-    if s["target_count"] and abs(n_land_now - aim_land) > 0.05 * aim_land:
+    if want_count and abs(n_land_now - aim_land) > 0.05 * aim_land:
         n_states_ = int(len(np.unique(stl[stl > 0])))
         if n_land_now > aim_land:
             target_note = (f"too few: land provinces are parts of the states ({n_states_:,} in view, one province "
@@ -2958,12 +3020,21 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
                            f"(States tab) allow fewer provinces")
         else:
             target_note = f"too many: provinces under {MIN_PROVINCE_PX} px are merged into their neighbours"
-    report["target_count"] = ({"aim": s["target_count"], "land_scale": round(land_scale, 3), "passes": passes,
+    report["target_count"] = ({"aim": want_count, "land_scale": round(land_scale, 3), "passes": passes,
                                "land_aimed": aim_land, "sea_estimate": sea_est, "lake_estimate": lake_est, "model1": round(model1), "trim_merges": trimmed,
                                "land_after_sizing": n_land_now,
                                "note": target_note,
                                "land_min": round(lmin), "land_max": round(lmax)}
-                              if s["target_count"] else None)
+                              if want_count else None)
+    borders_now = border_count(P)
+    report["borders"] = {
+        "count": borders_now, "limit": GAME_MAX_BORDERS, "before_cap": borders_before, "merges": border_merges,
+        "max_provinces": MAX_PROVINCES,
+        "note": (f"over the game's limit of {GAME_MAX_BORDERS:,} province borders: it stops drawing them in "
+                 "large parts of the map -- aim at fewer provinces (target number, or larger sizes)"
+                 if borders_now > GAME_MAX_BORDERS else
+                 f"{border_merges:,} pairs of small land provinces merged to stay under the game's limit of "
+                 f"{GAME_MAX_BORDERS:,} borders ({borders_before:,} before)" if border_merges else None)}
     report["sea_centre_outside"] = len(_sea_centres_outside(P, ptype_new))
     report["sea_centre_split"] = sea_centre_split
     if s["city_provinces"]:

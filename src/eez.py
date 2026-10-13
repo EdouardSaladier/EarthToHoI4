@@ -237,7 +237,16 @@ def overlay(image: Image.Image, debug, excluded=(), opacity: float = OPACITY_DEF
     """(country map with the EEZ tint on its sea, report)."""
     lab, tags, report = zones(image, debug, excluded, min_region_px)
     t0 = time.time()
-    rgb = debug["country_rgb"]
+    out = tint(image, lab, tags, debug["country_rgb"], opacity)
+    report["seconds"] = round(report["seconds"] + time.time() - t0, 2)
+    return out, report
+
+
+def tint(image: Image.Image, lab, tags, rgb, opacity: float = OPACITY_DEFAULT):
+    """`image` with the zones of `zones()` tinted in their country's colour
+    (`rgb`: tag -> colour): sea x (1 - opacity) + colour x opacity. The app
+    makes the zones on the render in fixed colours and tints with the
+    configured ones, so a colour change doesn't redo the zones."""
     arr = np.asarray(image.convert("RGB"))
     colors = np.zeros((len(tags) + 1, 3), dtype=np.float32)
     for k, t in enumerate(tags, start=1):
@@ -247,8 +256,7 @@ def overlay(image: Image.Image, debug, excluded=(), opacity: float = OPACITY_DEF
     c = colors[lab[zone]]
     sea = np.asarray(core.BACKGROUND_COLOR, dtype=np.float32)
     out[zone] = sea * (1.0 - opacity) + c * opacity
-    report["seconds"] = round(report["seconds"] + time.time() - t0, 2)
-    return Image.fromarray(np.clip(np.rint(out), 0, 255).astype(np.uint8), mode="RGB"), report
+    return Image.fromarray(np.clip(np.rint(out), 0, 255).astype(np.uint8), mode="RGB")
 
 
 def zones(image: Image.Image, debug, excluded=(), min_region_px: int = 8):
