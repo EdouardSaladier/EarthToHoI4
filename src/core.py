@@ -4116,6 +4116,28 @@ RIVER_SOURCE, RIVER_FLOW_IN, RIVER_FLOW_OUT = 0, 1, 2
 RIVER_WIDTHS = list(range(3, 12))  # palette indices, narrow -> wide
 RIVER_WATER, RIVER_LAND = 254, 255
 
+# How big one river network (4-connected, tributaries included) may get.
+# The game walks each network when it loads the map, at a cost that grows
+# far faster than the network does, and a map of ours is 20-30x finer than
+# vanilla's, so a whole basin drawn at full resolution fuses into one river
+# the size of the map. Vanilla's biggest: 4,683 px, 12% of the map diagonal,
+# 26 branch pixels. Measured on the user's Yugoslavia map (the Danube basin,
+# 115,654 px / 91% / 623 branches, 20,053 provinces), as the time from
+# launching the game to the first dated log line, against 60 s for the same
+# map with no rivers at all:
+#     branch cap   cuts   biggest network        load
+#     none            0   115,654 px  623 br     never finished (>6 min)
+#     200             4    43,994 px  198 br     never finished (>4 min)
+#     100             9    22,830 px   99 br     never finished (>5 min)
+#     50             20    16,319 px   50 br     140 s
+#     24             43     7,160 px   24 br      65 s
+# So the networks are cut down to vanilla's number of branch points, which
+# on real rivers brings the size down with it; RIVER_MAX_NETWORK_PX is only
+# a guard for a long river with few tributaries (it binds on no map tested).
+RIVER_MAX_BRANCHES_DEFAULT = 25   # branch pixels (degree >= 3) per network; 0 = no limit
+RIVER_MAX_NETWORK_PX = 16000      # pixels per network: the backstop for a long river with
+                                  # few tributaries (16,319 px / 50 branches loaded in 140 s)
+
 
 def _river_image(idx_img):
     """Indexed (mode P) image with the HOI4 rivers palette."""
@@ -5720,7 +5742,125 @@ def _path_discharges(painted, rr, cc, sidx, dis_of_px):
     return path_dis
 
 
-def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis):
+def _split_big_networks(out, owner, water=None, max_branches=RIVER_MAX_BRANCHES_DEFAULT,
+                        max_px=RIVER_MAX_NETWORK_PX):
+    """Cut the drawn rivers so no 4-connected network is bigger than the game
+    can load quickly (RIVER_MAX_BRANCHES / RIVER_MAX_NETWORK_PX), with as few
+    cuts as possible.
+
+    The river pixels form a tree, so it is contracted to a skeleton -- nodes
+    are the branch pixels (degree >= 3) and the ends (degree <= 1), edges the
+    stretches of degree-2 pixels between them -- and partitioned by the
+    classic greedy: post-order from the source, a child's subtree is kept
+    with its parent while both limits still hold, and the edge is cut when
+    they don't. That is the smallest number of cuts for one additive weight;
+    with two it cuts as soon as either would be passed (measured on the
+    Yugoslavia map: 43 cuts, 0.02% of the river pixels, against 2,943 for
+    cutting every river at a fixed length).
+
+    A cut deletes one pixel of a stretch, taken **beside the junction** --
+    the tributary's last pixel before it meets its parent -- so the gap is
+    hidden at the confluence and the junction loses a branch with it. Called
+    before the one-source-per-network rule, which then gives each new piece
+    its own green source. Returns the number of cuts.
+    """
+    h, w = owner.shape
+    river = owner >= 0
+    if not river.any() or not max_branches:   # 0 = the user turned the limit off
+        return 0
+
+    def degrees(mask):
+        p = np.pad(mask, 1).view(np.uint8)
+        return (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) * mask
+
+    deg = degrees(river)
+    lab, n_net = ndimage.label(river, structure=_CONNECTIVITY_4)
+    # nothing to do when every network already fits
+    sizes = np.bincount(lab.ravel(), minlength=n_net + 1)
+    branches = np.bincount(lab[river & (deg >= 3)].ravel(), minlength=n_net + 1)
+    if not ((branches[1:] > max_branches) | (sizes[1:] > max_px)).any():
+        return 0
+
+    nid = {}
+    for y, x in zip(*np.nonzero(river & (deg != 2))):
+        nid[(int(y), int(x))] = len(nid)
+    edges = []            # (node, node, [the degree-2 pixels between them])
+    walked = set()
+    for (y, x), i in list(nid.items()):
+        for dy, dx in _D4:
+            ny, nx = y + dy, x + dx
+            if not (0 <= ny < h and 0 <= nx < w and river[ny, nx]) or ((y, x), (ny, nx)) in walked:
+                continue
+            path = []
+            py, pxx, cy, cx = y, x, ny, nx
+            while (cy, cx) not in nid:
+                path.append((cy, cx))
+                nxt = None
+                for ey, ex in _D4:
+                    ty, tx = cy + ey, cx + ex
+                    if (ty, tx) != (py, pxx) and 0 <= ty < h and 0 <= tx < w and river[ty, tx]:
+                        nxt = (ty, tx)
+                        break
+                if nxt is None:
+                    break
+                py, pxx, cy, cx = cy, cx, *nxt
+            walked.add(((y, x), (ny, nx)))
+            if (cy, cx) in nid:
+                walked.add(((cy, cx), path[-1] if path else (y, x)))
+                if nid[(cy, cx)] >= i:        # each stretch once
+                    edges.append((i, nid[(cy, cx)], path))
+
+    adj = {}
+    for ei, (u, v, _path) in enumerate(edges):
+        adj.setdefault(u, []).append((v, ei))
+        adj.setdefault(v, []).append((u, ei))
+    pos = {i: yx for yx, i in nid.items()}
+    is_branch = {i: int(deg[pos[i]] >= 3) for i in nid.values()}
+    by_net = {}
+    for yx, i in nid.items():
+        by_net.setdefault(int(lab[yx]), []).append(i)
+
+    cuts = 0
+    for net, members in by_net.items():
+        if branches[net] <= max_branches and sizes[net] <= max_px:
+            continue
+        root = next((i for i in members if out[pos[i]] == RIVER_SOURCE), members[0])
+        parent = {root: (None, None)}
+        order = []
+        stack = [root]
+        while stack:                          # depth first, iterative
+            u = stack.pop()
+            order.append(u)
+            for v, ei in adj.get(u, []):
+                if v not in parent:
+                    parent[v] = (u, ei)
+                    stack.append(v)
+        nb = {u: is_branch[u] for u in order}
+        npx = {u: 1 for u in order}
+        for u in reversed(order):             # children before their parent
+            par, ei = parent[u]
+            if par is None:
+                continue
+            path = edges[ei][2]
+            if nb[par] + nb[u] > max_branches or npx[par] + npx[u] + len(path) > max_px:
+                if not path:                  # two junctions side by side: nothing to take out
+                    continue
+                # the pixel beside the junction -- the tributary's last one,
+                # the red flow-in marker itself -- so the gap hides at the
+                # confluence, nothing is left pointing at a river that has
+                # gone, and the junction loses a branch with it
+                y, x = path[0] if is_branch[edges[ei][0]] else path[-1]
+                out[y, x] = RIVER_WATER if water is not None and water[y, x] else RIVER_LAND
+                owner[y, x] = -1
+                cuts += 1
+            else:
+                nb[par] += nb[u]
+                npx[par] += npx[u] + len(path)
+    return cuts
+
+
+def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis, water=None,
+                       max_branches=RIVER_MAX_BRANCHES_DEFAULT):
     """Paint the drawn rivers into `out` (palette indices) the way HOI4's
     rivers.bmp wants them:
       * width 3-11 by discharge (`path_dis`, see _path_discharges), on a log
@@ -5752,7 +5892,6 @@ def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis):
         out[pr_, pc_] = np.array(RIVER_WIDTHS, dtype=np.uint8)[cls]
     # Markers.
     D4 = ((-1, 0), (1, 0), (0, -1), (0, 1))
-    n_in = 0
     joined = set()
     for k, path in painted.items():
         par = int(parent_of.get(k, -1))
@@ -5761,10 +5900,12 @@ def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis):
                                                for a, b in D4):
             out[lr, lc] = RIVER_FLOW_IN
             joined.add(k)
-            n_in += 1
     for k, path in painted.items():
         if k not in joined:
             out[path[0]] = RIVER_SOURCE
+    # No network bigger than the game loads quickly (before the source rule,
+    # which gives every piece that comes out of it its own source).
+    n_cut = _split_big_networks(out, owner, water, max_branches)
     # Exactly one source per contiguous network.
     river = owner >= 0
     lab, n = ndimage.label(river, structure=_CONNECTIVITY_4)
@@ -5799,15 +5940,16 @@ def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis):
                     out[y, x] = RIVER_SOURCE
                     added += 1
     bounds = [float(np.exp(np.log(lo) + span * i / n_w)) for i in range(n_w + 1)]
-    return {"river_px": int(river.sum()), "sources": int((out == RIVER_SOURCE).sum()), "flow_ins": n_in,
-            "sources_added": added, "sources_removed": removed,
-            "width_classes_cms": [round(v, 2) for v in bounds]}
+    return {"river_px": int(river.sum()), "sources": int((out == RIVER_SOURCE).sum()),
+            "flow_ins": int((out == RIVER_FLOW_IN).sum()),
+            "sources_added": added, "sources_removed": removed, "networks": int(n),
+            "network_cuts": n_cut, "width_classes_cms": [round(v, 2) for v in bounds]}
 
 
 def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAULT,
                   min_length_px: int = RIVER_MIN_LENGTH_DEFAULT, auto_spacing_px=None,
                   through_lakes: bool = True, reach_sea: bool = True, drop_dead_ends: bool = True,
-                  fit_borders: bool = True):
+                  fit_borders: bool = True, max_branches: int = RIVER_MAX_BRANCHES_DEFAULT):
     """The Rivers tab's map of a render: land white, sea *and lakes* black,
     rivers blue -- per continent (RIVER_CONTINENTS), the `top_percent` % of
     that continent's HydroRIVERS segments in view with the highest average
@@ -5825,6 +5967,10 @@ def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAU
         nearest sea pixel, up to RIVER_MOUTH_MAX_GAP_PX away.
       drop_dead_ends: rivers ending inland outside any lake (river_dead_ends)
         are left out before the percentages are computed.
+      max_branches: the most branch pixels one river network (4-connected,
+        its tributaries included) may have before it is cut into several
+        (_split_big_networks); 0 = no limit, at the cost of the game taking
+        minutes to load the map.
       fit_borders: rivers along a river border (river_borders.json) are
         moved onto the GADM border (_snap_rivers_to_borders), and the
         country map is then fitted to the drawn rivers
@@ -6011,7 +6157,7 @@ def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAU
     report["head_merges"] = _merge_head_tributaries(owner, painted, path_dis, parent_of)
     report["straight_removed"], report["straight_removed_tributaries"], report["straight_removed_px"] =         _remove_straight_rivers(owner, painted, path_dis, parent_of)
     report["self_repaired"] = _repair_self_contacts(owner, painted, path_dis, parent_of, allowed)
-    report.update(_paint_hoi4_rivers(out, owner, painted, parent_of, path_dis))
+    report.update(_paint_hoi4_rivers(out, owner, painted, parent_of, path_dis, water, max_branches))
     countries = image
     if rb is not None:
         report["snapped_points"] = int((str_of_pt >= 0).sum())
@@ -6023,6 +6169,7 @@ def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAU
 
 
 _CONNECTIVITY_4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]])
+_D4 = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
 # --------------------------------------------------------------------------

@@ -979,6 +979,10 @@
       <input type="number" id="rvMinLen" value="10" min="0" max="10000" step="1">
       <div class="hint">A river is a branch from its source to where it joins another river, or a whole river on its own. Branches reaching the image edge and the lower course of a river at its mouth are kept. 0 keeps everything.</div>
 
+      <label for="rvBranches">Most branches in one river</label>
+      <input type="number" id="rvBranches" min="0" max="2000" step="1">
+      <div class="hint">A river network is a whole basin: every tributary that touches it, drawn as one connected set of pixels. <b>The game walks each network when it loads the map, at a cost that grows far faster than the network does</b>, and our maps are 20&ndash;30&times; finer than the game's own, so a basin like the Danube fuses into one river the size of the map &mdash; measured on a 4096&times;3072 Yugoslavia map, 623 branches in one river, the game never finished loading in 6&nbsp;minutes (60&nbsp;s for the same map with no rivers at all). Vanilla's biggest river has 26 branches and spans an eighth of the map. Over this many branch points, the network is cut into several at its smallest confluences &mdash; the fewest cuts that do it, one pixel each, the gap hidden where a tributary meets its parent, and each piece gets its own green source. Measured: 50 &rarr; 20 cuts, 140&nbsp;s to load; 24 &rarr; 43 cuts, 65&nbsp;s. 0 turns the limit off (the map may then take minutes to load, or never finish).</div>
+
       <button class="primary" id="rvRender">Render rivers</button>
       <a class="small-btn" id="rvBmp" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download rivers.bmp</a>
       <a class="small-btn" id="rvCountries" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download country map (fitted to the rivers)</a>
@@ -1171,6 +1175,12 @@
       <input type="number" id="mxManpower" min="1" max="1000" step="1">
       <label for="mxInfra">Infrastructure (every state)</label>
       <input type="number" id="mxInfra" min="0" max="5" step="1">
+      <label>Thumbnail</label>
+      <div class="radio-row">
+        <input type="checkbox" id="mxThumb" checked>
+        <label for="mxThumb" class="inline-label">Render the map for the mod's picture</label>
+      </div>
+      <div class="hint"><code>thumbnail.png</code>, 512&times;512, is what the launcher and the Workshop show: the mod's own map rendered the way the game draws it zoomed out (terrain, water, rivers, country colours and borders), cut to a square around the middle of the map, with the mod's name across it in the map font &mdash; white with the game's soft dark edge. Adds about 20&nbsp;s to the export; unticked, the Countries tab's map is used instead (the name is written on it all the same).</div>
       <label for="mxGameDir">Hearts of Iron IV folder</label>
       <div style="display:flex;gap:6px"><input type="text" id="mxGameDir" style="flex:1;min-width:0" placeholder="Found automatically"><button id="mxGameBrowse" type="button">Browse&hellip;</button></div>
       <label for="mxModDir">Mod folder</label>
@@ -1944,9 +1954,14 @@ trLoadSettings().catch(err => trShowError('Terrain settings failed to load: ' + 
 // ---------- tab: rivers ----------
 const rvMinLen = document.getElementById('rvMinLen');
 const rvAuto = document.getElementById('rvAuto');
-const rvFlags = { lakes: document.getElementById('rvLakes'), sea: document.getElementById('rvSea'),
+// NB: the "extend mouths" flag is sent as reach_sea, never as sea: `sea` is
+// the Countries view's sea level rise in metres, and these flags are set on
+// top of the view params by every tab that follows the rivers -- sending it
+// as sea=1 drowned every pixel at elevation 0 on the whole map.
+const rvFlags = { lakes: document.getElementById('rvLakes'), reach_sea: document.getElementById('rvSea'),
                   deadends: document.getElementById('rvDead'), borders: document.getElementById('rvBorders') };
 const rvSpacing = document.getElementById('rvSpacing');
+const rvBranches = document.getElementById('rvBranches');
 const rvRenderBtn = document.getElementById('rvRender');
 const rvError = document.getElementById('rvError');
 const rvMeta = document.getElementById('rvMeta');
@@ -1971,7 +1986,8 @@ function rvRemember() {
   try {
     const flags = {};
     for (const [k, el] of Object.entries(rvFlags)) flags[k] = el.checked;
-    localStorage.setItem(RV_STORE, JSON.stringify({ pct, minlen: rvMinLen.value, auto: rvAuto.checked, spacing: rvSpacing.value, flags }));
+    localStorage.setItem(RV_STORE, JSON.stringify({ pct, minlen: rvMinLen.value, branches: rvBranches.value,
+                                                    auto: rvAuto.checked, spacing: rvSpacing.value, flags }));
   } catch (e) { /* storage unavailable */ }
 }
 
@@ -1989,8 +2005,13 @@ async function rvLoadSettings() {
     <input type="number" id="rvPct-${c.code}" min="0.1" max="100" step="0.1"
            value="${(stored.pct && stored.pct[c.code]) || (data.default_percents || {})[c.code] || data.default_percent}">`).join('');
   rvMinLen.value = stored.minlen !== undefined ? stored.minlen : data.default_min_length;
+  rvBranches.value = stored.branches !== undefined ? stored.branches : data.default_branches;
   rvSpacing.value = stored.spacing !== undefined ? stored.spacing : data.default_spacing;
   rvAuto.checked = stored.auto !== undefined ? !!stored.auto : !!data.default_auto;
+  // settings saved before the flag was renamed still call it `sea`
+  if (stored.flags && stored.flags.reach_sea === undefined && stored.flags.sea !== undefined) {
+    stored.flags.reach_sea = stored.flags.sea;
+  }
   for (const [k, el] of Object.entries(rvFlags)) {
     if (stored.flags && stored.flags[k] !== undefined) el.checked = stored.flags[k];
     el.addEventListener('change', rvRemember);
@@ -2028,13 +2049,18 @@ async function rvRender() {
     rvShowError('The minimum length must be a whole number of pixels (0 keeps everything).');
     return;
   }
+  const branches = Number(rvBranches.value);
+  if (!(Number.isInteger(branches) && (branches === 0 || (branches >= 5 && branches <= 2000)))) {
+    rvShowError('The branches per river must be 0 (no limit) or between 5 and 2000.');
+    return;
+  }
   rvRemember();
   rvRenderBtn.disabled = true;
   rvRenderBtn.textContent = 'Rendering...';
   rvShowError('');
   rvImageArea.innerHTML = '<div class="spinner"></div>';
   try {
-    const params = new URLSearchParams({ ...view, pct: pctParts.join(','), minlen });
+    const params = new URLSearchParams({ ...view, pct: pctParts.join(','), minlen, branches });
     if (auto) { params.set('auto', '1'); params.set('spacing', spacing); }
     for (const [k, el] of Object.entries(rvFlags)) params.set(k, el.checked ? '1' : '0');
     const resp = await fetch(`/api/rivers/meta?${params}`);
@@ -2060,7 +2086,7 @@ async function rvRender() {
            ${r.extended_mouths ? `<div>${r.extended_mouths} river mouth(s) extended to the sea (+${r.extended_px} px)</div>` : ''}
            ${r.border_fit && r.border_fit.river_px ? `<div>River borders: ${r.border_fit.stretches} in view, ${(100 * r.border_fit.on_side_px / r.border_fit.river_px).toFixed(1)}% of their river pixels on one side, ${(100 * r.border_fit.on_border_px / r.border_fit.river_px).toFixed(1)}% beside the other country; ${r.border_fit.moved_px.toLocaleString()} country px moved to fit</div>` : ''}
            <div>${r.short_removed.toLocaleString()} river(s) under ${r.min_length_px} px removed</div>
-           <div>${r.river_px.toLocaleString()} river pixels, ${r.sources} river network(s), ${r.flow_ins} tributary junction(s)</div>`}`;
+           <div>${r.river_px.toLocaleString()} river pixels, ${r.sources} river network(s), ${r.flow_ins} tributary junction(s)${r.network_cuts ? `, ${r.network_cuts} cut to keep every network under ${branches} branches` : ''}</div>`}`;
     (r.continents || []).forEach(c => {
       const el = document.getElementById('rvCount-' + c.code);
       if (el) el.textContent = !c.in_view ? 'not in view'
@@ -2103,6 +2129,8 @@ async function rvRender() {
 
 rvRenderBtn.addEventListener('click', rvRender);
 rvMinLen.addEventListener('change', rvRemember);
+rvBranches.addEventListener('change', rvRemember);
+rvBranches.addEventListener('keydown', e => { if (e.key === 'Enter') rvRender(); });
 rvSpacing.addEventListener('change', rvRemember);
 rvSpacing.addEventListener('keydown', e => { if (e.key === 'Enter') rvRender(); });
 rvAuto.addEventListener('change', () => { rvApplyAutoState(); rvRemember(); });
@@ -2988,6 +3016,9 @@ function rvRiverParams() {
   const minlen = Number(rvMinLen.value);
   if (!(Number.isInteger(minlen) && minlen >= 0)) throw new Error('Rivers tab: the minimum length must be a whole number of pixels.');
   p.minlen = minlen;
+  const branches = Number(rvBranches.value);
+  if (!(Number.isInteger(branches) && (branches === 0 || (branches >= 5 && branches <= 2000)))) throw new Error('Rivers tab: the branches per river must be 0 (no limit) or between 5 and 2000.');
+  p.branches = branches;
   for (const [k, el] of Object.entries(rvFlags)) p[k] = el.checked ? '1' : '0';
   return p;
 }
@@ -4097,7 +4128,10 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') colorModal.s
 // ---------- tab: HOI4 mod export ----------
 const MX_STORE = 'mapTool.hoi4mod';
 const mxFields = { name: document.getElementById('mxName'), manpower_pct: document.getElementById('mxManpower'),
-                   infrastructure: document.getElementById('mxInfra') };
+                   infrastructure: document.getElementById('mxInfra'), thumbnail: document.getElementById('mxThumb') };
+// mod_<setting>= takes numbers, so a checkbox goes as 1 / 0
+const mxGet = el => (el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+const mxSet = (el, v) => { if (el.type === 'checkbox') el.checked = Number(v) !== 0; else el.value = v; };
 const mxExportBtn = document.getElementById('mxExport');
 let mxPoll = null;
 
@@ -4130,6 +4164,7 @@ function mxShowJob(job) {
     <div>Folder: <code>${escapeHtml(job.path)}</code></div>
     <div>${f(r.provinces)} provinces, ${f(r.states)} states (${f(r.impassable_states)} impassable), ${f(job.countries)} countries, ${f(r.strategic_regions)} strategic regions</div>
     <div>${f(r.victory_points)} victory points, ${f(r.railways)} railways, ${f(r.straits)} sea crossings over straits</div>
+    ${r.thumbnail && !r.thumbnail.error ? `<div>Thumbnail: ${r.thumbnail.size}&times;${r.thumbnail.size} from the ${escapeHtml(r.thumbnail.source)}${r.thumbnail.font ? `, the name in <code>${escapeHtml(r.thumbnail.font)}</code>` : ''} (${r.thumbnail.seconds} s)</div>` : ''}
     ${r.map_scale ? `<div>Map scale ${r.map_scale.km_per_px} km per pixel: distances in pixels (radar, railway guns, interception ...) &times; ${r.map_scale.factor}; lighting, day / night and tree seasons fitted to the frame${r.daynight && r.daynight.shaders && r.daynight.shaders.length ? '' : ' (<b>shaders not patched</b>: game files not as expected)'}</div>` : ''}
     <div>Checks: ${r.problems && r.problems.length ? `<b>${r.problems.map(escapeHtml).join('; ')}</b>` : '<b>all pass</b>'}</div>
     ${(r.warnings || []).map(w => `<div><b>${escapeHtml(w)}</b></div>`).join('')}
@@ -4192,7 +4227,7 @@ async function mxLoad() {
   mxGameDir.value = saved.game_dir || '';
   mxModDir.value = saved.mod_dir || '';
   const info = await mxRefreshPaths();
-  for (const [k, el] of Object.entries(mxFields)) el.value = saved[k] !== undefined ? saved[k] : info.defaults[k];
+  for (const [k, el] of Object.entries(mxFields)) mxSet(el, saved[k] !== undefined ? saved[k] : info.defaults[k]);
   if (info.job && info.job.state === 'running') mxStartPolling();
   mxShowJob(info.job);
 }
@@ -4233,7 +4268,7 @@ function fullRunQuery() {
   const sr = {};
   for (const [k, v] of Object.entries(srSave())) sr['sr_' + k] = v;
   const mod = {};
-  for (const [k, el] of Object.entries(mxFields)) mod['mod_' + k] = el.value;
+  for (const [k, el] of Object.entries(mxFields)) mod['mod_' + k] = mxGet(el);
   return new URLSearchParams({ ...pvQueryObject(view, other, pvSave()), ...sr, ...mod,
                                game_dir: mxGameDir.value.trim(), mod_dir: mxModDir.value.trim() });
 }
@@ -4243,7 +4278,7 @@ async function mxExport() {
   if (!view) { mxShowError('Select at least one country or subdivision in the Countries tab first.'); return; }
   saveView();
   const s = {};
-  for (const [k, el] of Object.entries(mxFields)) s[k] = el.value;
+  for (const [k, el] of Object.entries(mxFields)) s[k] = mxGet(el);
   try {
     localStorage.setItem(MX_STORE, JSON.stringify({ ...s, game_dir: mxGameDir.value.trim(), mod_dir: mxModDir.value.trim() }));
   } catch (e) { /* storage unavailable */ }

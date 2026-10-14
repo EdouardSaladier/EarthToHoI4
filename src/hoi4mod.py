@@ -48,8 +48,9 @@ MOD_DEFAULTS = {
     "name": "Map Tool World",       # shown in the launcher; the folder is its ASCII form
     "manpower_pct": 100,            # state manpower = population x this %
     "infrastructure": 2,            # every owned state
+    "thumbnail": 1,                 # render the map for thumbnail.png (adds ~20 s)
 }
-MOD_LIMITS = {"manpower_pct": (1, 1000), "infrastructure": (0, 5)}
+MOD_LIMITS = {"manpower_pct": (1, 1000), "infrastructure": (0, 5), "thumbnail": (0, 1)}
 
 # Folders whose base-game content is unloaded (replace_path); KEEP lists the
 # generic files copied back (sanitised, see _sanitise).
@@ -1523,6 +1524,10 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
     write_map_scale(out, van, src["view"], W, H, report)
     write_descriptor(out, settings, van, src)
     write_about(out, src, settings, countries, report)
+    # last: the thumbnail renders the mod's own map files, so they all have to
+    # be written (and descriptor.mod with them, for its replace_path)
+    progress("Thumbnail")
+    write_thumbnail(out, settings, van, src, report)
     report["countries"] = [{"gadm": g, "tag": c["tag"], "vanilla": c["vanilla"], "name": c["name"],
                             "states": len(c["states"]), "capital": c["capital"]["id"], "flag": c.get("flag")}
                            for g, c in countries.items()]
@@ -3063,11 +3068,31 @@ def write_descriptor(out, settings, van, src):
              'tags={\n\t"Map"\n\t"Alternative History"\n}', f'supported_version="{major}"']
     lines += [f'replace_path="{p}"' for p in REPLACE_PATHS]
     _write(out / "descriptor.mod", "\n".join(lines) + "\n")
-    thumb = src.get("thumbnail")
-    if thumb is not None:
-        t = thumb.convert("RGB")
-        t.thumbnail((512, 512))
-        t.save(out / "thumbnail.png")
+
+
+def write_thumbnail(out, settings, van, src, report):
+    """thumbnail.png (the picture the launcher and the Workshop show): the mod
+    we have just finished writing, rendered the way the game draws it
+    (modthumbnail -> hoi4renderer), cut to a 512x512 square, with the mod's
+    name across it in the map font (user). Needs the written map files, so it
+    comes last. Never fails the export: without the render (or with it turned
+    off) the Countries tab's map is used, and the name is written all the
+    same."""
+    out = Path(out)
+    try:
+        import modthumbnail
+        img, rep = modthumbnail.render_thumbnail(
+            str(out), str(van.game) if van else "", settings["name"], fallback=src.get("thumbnail"),
+            render=bool(settings.get("thumbnail", 1)))
+        img.save(out / "thumbnail.png")
+    except Exception as e:
+        report["thumbnail"] = {"error": f"{type(e).__name__}: {e}"}
+        report["warnings"].append(f"No thumbnail: {type(e).__name__}: {e}")
+        return
+    report["thumbnail"] = rep
+    for key in ("note", "title_error"):
+        if rep.get(key) and settings.get("thumbnail", 1):
+            report["warnings"].append(f"Thumbnail: {rep[key]}")
 
 
 def install_descriptor(out, mod_dir):

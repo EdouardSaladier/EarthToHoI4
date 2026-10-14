@@ -25,6 +25,7 @@ files (`land_sea_settings.json`, `color_config.json`), `river_borders.json`.
 | `provinces.py` | Provinces, sea areas, topology rules, `definition.csv`, `province_states.csv` |
 | `strategic.py`, `bathymetry.py`, `climate.py` | Strategic regions, naval terrain, weather |
 | `hoi4mod.py`, `hoi4clean.py`, `pdx.py` | The mod export; the cleaner for the base game's scripts; a Paradox script parser / writer |
+| `modthumbnail.py`, `hoi4renderer/` | The mod's `thumbnail.png`; a copy of the standalone Hoi4renderer (the game's map shaders in software) |
 | `palettes.py`, `color_presets/` | Country colours and presets |
 | `result_cache.py` | Disk cache of every stage's results |
 | `river_borders.json`, `cache/` | Small derived data shipped with the tool (rebuilt automatically when missing or stale; `python src/build_cache.py --clean` rebuilds it all) |
@@ -56,6 +57,14 @@ after editing it (the header's refresh button does that).
 - Rivers: 1 px wide, never touching themselves or another river except a
   tributary at its confluence — enforced while drawing, never fixed after.
   Where a border follows a river, the border is moved to the river.
+- No river network (a whole basin, 4-connected) bigger than the game loads
+  quickly: the game walks each one at a cost that grows much faster than the
+  network, and these maps are far finer than vanilla's, so a basin can end up
+  one river the size of the map — measured, a 115,654-px network (623
+  branches) left the game loading for over six minutes where the same map
+  without rivers took 60 s. Over the Rivers tab's branch limit (default 25),
+  the network is cut at its smallest confluences, with the fewest cuts that
+  do it (one pixel each, hidden where a tributary meets its parent).
 
 ## States
 
@@ -133,6 +142,13 @@ fitted on vanilla; naval terrain from bathymetry, islands and coast distance.
   effects removed, gated definitions dropped). Exclusion lists that empty out
   lose only the list — dropping the generic AI division templates crashed the
   game mid-game.
+- `thumbnail.png` (512x512): the mod that was just written, rendered by the
+  vendored `hoi4renderer` the way the game draws the map zoomed out, cut to a
+  centred square, with the mod's name across it in its own map font (white
+  over a blurred black copy of the letters, as the game draws map names).
+  Written last, since it reads the mod's finished map files and its
+  `descriptor.mod`; about 20 s, and it falls back to the Countries tab's map
+  rather than failing the export.
 - `ABOUT_EarthToHoI4.txt` in every mod: made by the tool (link, date, code
   version, frame), the datasets used with links and licences (`DATA_CREDITS`),
   flags / fonts credits, the Paradox disclaimer, the parameters file.

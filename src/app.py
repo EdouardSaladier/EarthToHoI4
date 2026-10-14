@@ -1317,7 +1317,8 @@ def _rivers_from_args():
     core.RIVER_CONTINENTS; missing ones use top=, default 10), minlen=
     (px, rivers shorter than that are removed; 0 keeps all), and auto=1 +
     spacing= (px) to pick each continent's percentage from river density
-    instead of pct; lakes=0 / sea=0 / deadends=0 / borders=0 turn off
+    instead of pct; branches= (the most branch points one river network may
+    have before it is cut, 0 = no limit); lakes=0 / reach_sea=0 / deadends=0 / borders=0 turn off
     drawing rivers across lakes, extending mouths to the sea, dropping
     rivers that end inland outside a lake, and fitting river borders.
     Returns (river map, report, meta, country map with borders fitted to
@@ -1334,6 +1335,7 @@ def _rivers_from_args():
                 raise core.RenderError(f"Unknown continent '{code}'")
             pct[code] = float(value)
         min_len = int(request.args.get("minlen", core.RIVER_MIN_LENGTH_DEFAULT))
+        max_branches = int(request.args.get("branches", core.RIVER_MAX_BRANCHES_DEFAULT))
         spacing = None
         if request.args.get("auto", "0") in ("1", "true"):
             spacing = float(request.args.get("spacing", core.RIVER_AUTO_SPACING_DEFAULT))
@@ -1346,8 +1348,10 @@ def _rivers_from_args():
             raise core.RenderError(f"{names[code]}: the river percentage must be above 0 and at most 100")
     if not 0 <= min_len <= 10000:
         raise core.RenderError("The minimum river length must be between 0 and 10000 px")
+    if max_branches and not 5 <= max_branches <= 2000:
+        raise core.RenderError("The branches per river must be 0 (no limit) or between 5 and 2000")
     flags = {name: request.args.get(param, "1") not in ("0", "false")
-             for name, param in (("through_lakes", "lakes"), ("reach_sea", "sea"), ("drop_dead_ends", "deadends"),
+             for name, param in (("through_lakes", "lakes"), ("reach_sea", "reach_sea"), ("drop_dead_ends", "deadends"),
                                  ("fit_borders", "borders"))}
     # made from the fixed-colour render (colours only tell the countries
     # apart there), so a colour change doesn't redraw the rivers; the fitted
@@ -1355,10 +1359,11 @@ def _rivers_from_args():
     img, meta, _debug, pairs = _render_colored_from_args()
     bimg, _bmeta, bdebug = _render_base_from_args()
     k = result_cache.key("rivers", _ck(bimg), sorted(pct.items()), min_len, spacing, sorted(flags.items()),
-                         _data_sig("hydrosheds", "river_borders.json"))
+                         max_branches, _data_sig("hydrosheds", "river_borders.json"))
 
     def compute():
-        rivers, report = core.render_rivers(bimg, bdebug, pct, min_len, spacing, **flags)
+        rivers, report = core.render_rivers(bimg, bdebug, pct, min_len, spacing,
+                                            max_branches=max_branches, **flags)
         countries = report.pop("countries_image", None)
         return rivers, report, (None if countries is bimg else countries)
     with _render_lock:
@@ -1388,6 +1393,7 @@ def api_rivers_settings():
                     "default_percents": core.RIVER_TOP_PERCENT_BY_CONTINENT,
                     "default_auto": core.RIVER_AUTO_DEFAULT,
                     "default_min_length": core.RIVER_MIN_LENGTH_DEFAULT,
+                    "default_branches": core.RIVER_MAX_BRANCHES_DEFAULT,
                     "default_spacing": core.RIVER_AUTO_SPACING_DEFAULT})
 
 
@@ -2328,7 +2334,7 @@ def api_hoi4_export():
             _export_job.update(state="done", step="Done", path=str(out), report={
                 k: rep.get(k) for k in ("states", "impassable_states", "provinces", "strategic_regions",
                                         "victory_points", "railways", "straits", "problems", "warnings",
-                                        "map_scale", "daynight", "lighting")},
+                                        "map_scale", "daynight", "lighting", "thumbnail")},
                 countries=len(rep.get("countries", [])), seconds=round(time.time() - _export_job["started"], 1))
         except _Preparing:
             _export_job.update(state="error", error="The land cover is still being prepared (Terrain tab)")

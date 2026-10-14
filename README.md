@@ -37,6 +37,10 @@ straits, a 1936 bookmark and localisation in every game language. The base
 game's countries are not loaded and its country-specific files are neutralised
 (`replace_path` + a dead-reference cleaner), so the mod launches on its own.
 
+Its thumbnail is made from the mod itself: the finished map rendered the way
+the game draws it zoomed out, as a 512x512 picture with the mod's name across
+it in the game's map font.
+
 ## Requirements
 
 - Python 3.11 or newer
