@@ -55,6 +55,8 @@ python src/app.py
 ```
 
 Then open http://127.0.0.1:5000 (on Windows, `start_webui.bat` does both).
+The UI keeps one short line per setting; `MANUAL.md` — the **Manual** link on
+every tab — is the long version.
 Start with the **Download** tab ("Download all"), then go through the tabs
 left to right. The HOI4 mod tab finds the game and your mod folder by itself
 (Steam, GOG, Microsoft Store); if it can't, choose them there.
@@ -111,4 +113,6 @@ only embeds the colour palettes of the game's map bitmaps (rivers, terrain,
 trees), which the output files must use. The mod export reads the rest from
 your own installation.
 
+`MANUAL.md` explains every setting of every tab in full (the tool serves it
+at <http://127.0.0.1:5000/manual>, and each tab links to its own section).
 See `DEVELOPMENT.md` for how the tool works inside.

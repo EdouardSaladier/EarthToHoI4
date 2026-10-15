@@ -170,73 +170,31 @@ def _km(lon1, lat1, lon2, lat2):
 
 
 # ------------------------------------------------------------------ state names
-# user: states named after their GADM division, never a city's name
-NAME_LEVEL = {"FRA": 2}  # departements (the L3 arrondissements carry their seat's name)
-_NO_NAME = re.compile(r"^\s*(n\.\s*a\.?.*|unknown.*|merkez|centre|center)?\s*$", re.I)
-COMPASS = ("East", "Northeast", "North", "Northwest", "West", "Southwest", "South", "Southeast")
+# user (2026-10-15): "remove the state naming rules, use directly the proper
+# GADM administrative names without changes, endonyms if possible".
+# GADM's NAME_<level> *is* the endonym, romanized (Bayern, Toscana, Fejer,
+# Moskovskaya) -- its NL_NAME_<level> native-script field covers only 15% of
+# the units, is almost never Latin script (so the mod's fonts have no glyphs
+# for it) and carries junk rows, so it is not used. Everything the export used
+# to do to a GADM name is gone: the per-country naming level (France's
+# departements), the merged-state "whole unit" rule, the suffix / "Unorganized
+# in" / trailing-number clean-up, Russia's dropped "rayon", Ukraine's
+# adjectival raions resolved to a town, the parent / compass disambiguation of
+# repeated names, and the capital state taking its victory point's name.
+# A division's name is now whatever GADM calls it, repeats included -- each
+# state has its own STATE_<id> localisation key, so duplicates are legal.
+_NO_NAME = re.compile(r"^\s*(n\.\s*a\.?|unknown)?\s*$", re.I)
 
 
-def _fold(s):
-    try:
-        from unidecode import unidecode
-        s = unidecode(s)
-    except ImportError:
-        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return re.sub(r"[^a-z]", "", s.lower())
-
-
-def _gadm_names(levels, field="name"):
-    """{level: {GID without its _version suffix: NAME}} (field="type": ENGTYPE)."""
+def _gadm_names(levels):
+    """{level: {GID without its _version suffix: GADM's NAME_<level>}}."""
     import states as states_mod
     out = {}
     for lv in levels:
         idx = states_mod.level_index(lv)
         if idx is not None:
-            out[lv] = {g.rsplit("_", 1)[0]: nm for g, nm in zip(idx["gid"].tolist(), idx[field].tolist())}
+            out[lv] = {g.rsplit("_", 1)[0]: nm for g, nm in zip(idx["gid"].tolist(), idx["name"].tolist())}
     return out
-
-
-CITY_UNIT = re.compile(r"city|capital|metropol|municipal|federal|urban|district of", re.I)
-
-
-def _same_place(a, b):
-    """Two names of one place in different languages / forms (Al Qahirah /
-    El-Qahira, Kiev City / Kyiv, Greater London / London)."""
-    import difflib
-    stop = r"\b(city|greater|al|el|the|of|municipality|capital|governorate|oblast|province|region)\b"
-    fa = re.sub(r"[^a-z]", "", re.sub(stop, "", _ascii_lower(a)))
-    fb = re.sub(r"[^a-z]", "", re.sub(stop, "", _ascii_lower(b)))
-    if not fa or not fb:
-        return False
-    return fa in fb or fb in fa or difflib.SequenceMatcher(None, fa, fb).ratio() >= 0.7
-
-
-def _ascii_lower(s):
-    try:
-        from unidecode import unidecode
-        s = unidecode(s)
-    except ImportError:
-        s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return re.sub(r"[-']", " ", s.lower())
-
-
-def name_capitals(countries, vps, tables_types=None):
-    """User: a capital state named after the capital city itself (a city
-    unit -- Moscow City, Kiev City, Berlin -- or the same place under another
-    form) takes the capital victory point's name, the endonym (Moskva):
-    the two must match. A capital in a larger division (Noord-Holland) keeps it."""
-    renamed = 0
-    for c in countries.values():
-        s, p = c.get("capital"), c.get("capital_province")
-        if s is None or p not in vps:
-            continue
-        vp = vps[p][1]
-        if not vp or vp == s["name"]:
-            continue
-        if CITY_UNIT.search(s.get("_unit_type") or "") or _same_place(s["name"], vp):
-            s["name"] = vp
-            renamed += 1
-    return renamed
 
 
 def _gid_at(gid, level):
@@ -244,175 +202,28 @@ def _gid_at(gid, level):
     return ".".join(parts[:level + 1]) if len(parts) > level else None
 
 
-def _ukr_towns():
-    try:
-        import cities
-        idx = cities.load_city_index()
-    except Exception:
-        return []
-    sel = np.flatnonzero(idx["country"] == "UA")
-    out = []
-    for i in sel:
-        nm = idx["name"][i]
-        alts = {_fold(nm)} | {_fold(a) for a in str(idx["alt"][i] or "").split(",")
-                              if a.strip() and a.isascii()}
-        out.append((alts - {""}, nm, float(idx["lon"][i]), float(idx["lat"][i]), float(idx["own_population"][i])))
-    return out
-
-
-def _ukr_name(nm, lon, lat, towns):
-    """GADM's Ukrainian raions are adjectives ("Cherkas'kyi", "Nizhyns'ka"):
-    the town they're named after -- its seat, normally its largest town: the
-    most populated GeoNames place within 60 km sharing at least the first 3
-    letters (Sums'ka -> Sumy, Kerchens'ka -> Kerch); else the stem."""
-    stem = re.sub(r"['’]?k(yi|yy|a|e)$", "", nm)
-    if stem == nm:
-        return nm
-    f = _fold(stem)
-    best = None
-    for tfs, tn, tlo, tla, tpop in towns:
-        n = 0
-        for tf in tfs:
-            k = 0
-            for a, b in zip(f, tf):
-                if a != b:
-                    break
-                k += 1
-            n = max(n, k)
-        if n < min(len(f), 3):
-            continue
-        d = float(_km(lon, lat, tlo, tla))
-        full = n >= min(len(f), max(4, len(f) - 2))  # a close spelling wins over a bigger town
-        if d < 60 and (best is None or (full, tpop) > best[0]):
-            best = ((full, tpop), tn)
-    if best:
-        return best[1]
-    stem = stem.rstrip("'’")
-    if re.search(r"vs$", stem):  # Chuhuivs'kyi -> Chuhuiv
-        return stem[:-1]
-    return stem + "k" if stem.endswith("s") else stem  # Kupians'kyi -> Kupians'k
-
-
-def _clean_unit_name(nm, tag):
-    nm = str(nm or "").replace("‹", "i").strip()  # GADM's broken Ukrainian i
-    m = re.match(r"unorgani[sz]ed in (.+)$", nm, re.I)  # Egypt: "Unorganized in Al Buhayrah"
-    if m:
-        nm = m[1]
-    nm = re.sub(r"\s+\d+$", "", nm)  # "Al-Mansurah 1"
-    if tag == "RUS":
-        nm = re.sub(r"\s+(rayon|raion|r-n|gorsovet)$", "", nm, flags=re.I)  # user: suffix unneeded
-    return nm
-
-
-def name_states(states, geo, view):
-    """Sets each owned state's "name": its GADM division (NAME_LEVEL per
-    country, else the States tab's level; unnamed units -- Spain's "n.a.",
-    Turkey's "Merkez" -- take their parent's name), cleaned; repeated names in
-    a country told apart by their parent division, then by compass direction."""
+def name_states(states):
+    """Sets each owned state's "name" to the GADM name of the division it was
+    built from, spelled exactly as GADM spells it. A merged state takes the
+    unit its own `gid` names. The only fallback: a unit GADM leaves unnamed
+    ("n.a." or blank -- 5 of its 45,962 level-2 units, mostly the Emirates'
+    sectors and the Dutch lake "provinces", and 2,838 of its level-3 ones)
+    takes its parent division's name, since a state with no name at all
+    cannot be localised.
+    """
     owned = [s for s in states if s.get("gid") and not s["impassable"]]
     levels = sorted({lv for s in owned for lv in range(0, int(s.get("level") or 0) + 1)})
     tables = _gadm_names(levels)
-    types = _gadm_names(levels, "type")
-    towns = None
-    xy = {}
-    for s in owned:
-        a = np.array([geo.area[p] for p in s["provinces"]], float)
-        c = np.array([geo.centre_xy(p) for p in s["provinces"]], float)
-        xy[id(s)] = (a @ c) / max(a.sum(), 1)
-
-    def unit_name(s, lv):
-        while lv >= 0:
-            g = _gid_at(s["gid"], lv)
-            nm = tables.get(lv, {}).get(g) if g else None
-            nm = _clean_unit_name(nm, s["gadm"]) if nm else ""
-            if not _NO_NAME.match(nm):
-                return nm, lv
-            lv -= 1
-        return s["name"], 0
-    children = {}  # (level, parent GID) -> its units at that level
-    for lv_, tab in tables.items():
-        for g in tab:
-            parts = g.split(".")
-            for d in range(1, len(parts)):
-                children.setdefault((lv_, ".".join(parts[:d])), []).append(g)
-
-    def whole_unit(s, lv):
-        """The deepest unit (level >= 1) with at least 2/3 of its subdivisions
-        in this merged state -- several: the one giving it most of them
-        (Moscow City's okrugs -> "Moscow City", Cairo's 32 of 42 kisms + all
-        of Giza's 19 -> "Al Qahirah"; not a city district's name)."""
-        mem = {g.rsplit("_", 1)[0] for g in s.get("merged") or []}
-        if len(mem) < 2:
-            return None
-        for d in range(lv - 1, 0, -1):
-            best = None
-            for anc in sorted({".".join(g.split(".")[:d + 1]) for g in mem}):
-                kids = children.get((lv, anc), [])
-                n_in = len(set(kids) & mem)
-                if kids and n_in >= 2 and 3 * n_in >= 2 * len(kids) and (best is None or n_in > best[0]):
-                    nm = _clean_unit_name(tables.get(d, {}).get(anc), s["gadm"])
-                    if nm and not _NO_NAME.match(nm):
-                        best = (n_in, nm, anc)
-            if best:
-                return best[1], d, best[2]
-        return None
     for s in owned:
         lv = int(s.get("level") or 0)
-        lv = min(lv, NAME_LEVEL.get(s["gadm"], lv))
-        wu = whole_unit(s, int(s.get("level") or 0))
-        if wu:
-            nm, lv, unit_gid = wu
-        else:
-            nm, lv = unit_name(s, lv)
-            unit_gid = _gid_at(s["gid"], lv)
-        s["_unit_type"] = types.get(lv, {}).get(unit_gid) or ""
-        if s["gadm"] == "UKR" and lv >= 2:
-            if towns is None:
-                towns = _ukr_towns()
-            lon, lat = px_lonlat(view, [xy[id(s)][0]], [xy[id(s)][1]])
-            nm = _ukr_name(nm, float(lon[0]), float(lat[0]), towns)
-        s["name"] = nm
-        s["_parent"] = unit_name(s, lv - 1)[0] if lv > 1 else ""
-    # repeated names within a country
-    groups = defaultdict(list)
-    for s in owned:
-        groups[(s["owner"], s["name"])].append(s)
-    for (_o, nm), g in groups.items():
-        if len(g) < 2:
-            continue
-        if len({s["_parent"] for s in g}) == len(g) and all(s["_parent"] and s["_parent"] != nm for s in g):
-            for s in g:
-                s["name"] = f"{nm} ({s['_parent']})"
-            continue
-        sub = defaultdict(list)  # same parent: by direction from the group's centre
-        for s in g:
-            sub[s["_parent"] if len({t["_parent"] for t in g}) > 1 else ""].append(s)
-        for parent, h in sub.items():
-            base = f"{nm} ({parent})" if parent and parent != nm and len(sub) > 1 else nm
-            if len(h) == 1:
-                h[0]["name"] = base
-                continue
-            pts = np.array([xy[id(s)] for s in h])
-            d = pts - pts.mean(0)
-            spread = math.sqrt(max(float((d ** 2).sum(1).mean()), 1e-9))
-            labels = []
-            for dx, dy in d:
-                if len(h) == 2:
-                    lab = ("West" if dx < 0 else "East") if abs(dx) >= abs(dy) else ("North" if dy < 0 else "South")
-                elif math.hypot(dx, dy) < 0.35 * spread:
-                    lab = "Central"
-                else:
-                    lab = COMPASS[int(round(math.atan2(-dy, dx) / (math.pi / 4))) % 8]
-                labels.append(lab)
-            seen = defaultdict(int)
-            for s, lab in zip(h, labels):
-                seen[lab] += 1
-            used = defaultdict(int)
-            for s, lab in zip(h, labels):
-                used[lab] += 1
-                s["name"] = f"{lab} {base}" + (f" {used[lab]}" if seen[lab] > 1 else "")
-    for s in owned:
-        s.pop("_parent", None)
+        while lv >= 0:
+            g = _gid_at(s["gid"], lv)
+            nm = str(tables.get(lv, {}).get(g) or "").strip() if g else ""
+            if nm and not _NO_NAME.match(nm):
+                s["name"] = nm
+                break
+            lv -= 1
+
 
 
 def name_regions(regions, state_of, geo):
@@ -1451,7 +1262,7 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
         s["tag"] = countries[s["owner"]]["tag"]
         if not s["impassable"]:
             countries[s["owner"]]["states"].append(s)
-    name_states(states, geo, src["view"])
+    name_states(states)
     name_regions(src["regions"], state_of, geo)
 
     # ---- victory points from the City tab's cities
@@ -1503,8 +1314,6 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
         cs = cap[1] if cap else max(c["states"], key=lambda s: (s["population"], len(s["provinces"])))
         c["capital"] = cs
         c["capital_province"] = cap[2] if cap else cs["main"]
-    report["capital_states_renamed"] = name_capitals(countries, vps)
-    name_regions(src["regions"], state_of, geo)  # again: capital states may have new names
 
     progress("Map images")
     write_map_images(out, src, geo, states, state_of, van, report)
@@ -1522,6 +1331,7 @@ def build_mod(src, settings, out, game=None, progress=lambda msg: None):
     write_lighting(out, src["view"], H, report)
     write_daynight(out, van, src["view"], W, H, report)
     write_map_scale(out, van, src["view"], W, H, report)
+    write_view_defines(out, report)
     write_descriptor(out, settings, van, src)
     write_about(out, src, settings, countries, report)
     # last: the thumbnail renders the mod's own map files, so they all have to
@@ -1547,6 +1357,8 @@ DATA_CREDITS = (
      "free for academic and other non-commercial use; redistribution of the data and commercial use not allowed"),
     ("NASA Blue Marble: topography, bathymetry, imagery", "heightmap, normal map, sea depth, colour map",
      "https://visibleearth.nasa.gov/collection/1484/blue-marble", "NASA imagery, free to use with credit"),
+    ("GMTED2010 (USGS / NGA)", "land elevations in metres: heightmap, flooded coasts, river mouths",
+     "https://topotools.cr.usgs.gov/gmted_viewer/", "public domain (USGS), credit requested"),
     ("HydroSHEDS: HydroRIVERS and HydroLAKES", "rivers, lakes", "https://www.hydrosheds.org", "CC BY 4.0"),
     ("Copernicus Global Land Cover (CGLS-LC100)", "terrain, forests", "https://land.copernicus.eu/global/products/lc",
      "free and open, with attribution (Copernicus Service information)"),
@@ -2885,6 +2697,43 @@ def write_fonts(out, van, report):
             glyphs = ids if glyphs is None else glyphs & ids
     _GLYPHS[0] = glyphs
     report["fonts"] = {"from": str(src), "files": len(files)}
+
+
+# -------------------------------------------------------------- view defines
+# Camera, map-label and flag defines the user asked for (2026-10-15), written
+# into every export **verbatim, their own comments included**: unlike the
+# lighting / day-night / map-scale files these are fixed values, not computed
+# from the frame, so the block below is the file. Edit it here to change them.
+#
+# Why they are wanted: vanilla's values are tuned for its own 5632x2048 map.
+# These maps are far finer, so the camera stops too low to see a big frame at
+# once and province names, victory points and capital icons fade out long
+# before you are zoomed far enough back; and the export writes real national
+# flags, which vanilla's texture caps would scale back down.
+#
+# **Lua comments are `--`**: a `#` in a defines file makes the game drop every
+# define in it and crash.
+VIEW_DEFINES = """\
+NDefines.NFrontend.CAMERA_MIN_HEIGHT = 50.0
+NDefines.NFrontend.CAMERA_MAX_HEIGHT = 3800.0
+NDefines.NGraphics.PROVINCE_NAME_DRAW_DISTANCE = 1000.0             -- Remove province names beyond this distance
+NDefines.NGraphics.COUNTRY_FLAG_LARGE_STRIPE_MAX_HEIGHT = 24000        -- VANILLA: 8192
+NDefines.NGraphics.COUNTRY_FLAG_SMALL_TEX_MAX_SIZE = 512            -- VANILLA: 64
+NDefines.NGraphics.COUNTRY_FLAG_STRIPE_TEX_MAX_HEIGHT = 8196        -- VANILLA: 2048
+NDefines.NGraphics.COUNTRY_FLAG_TEX_MAX_SIZE = 2048                    -- VANILLA: 256
+NDefines.NGraphics.VICTORY_POINT_MAP_ICON_TEXT_CUTOFF = {225, 375, 750}  -- At what camera distance the VP name text disappears.
+NDefines.NGraphics.VICTORY_POINTS_DISTANCE_CUTOFF = {375,750,1500} -- At what distance VPs are hidden
+NDefines.NGraphics.CAPITAL_ICON_CUTOFF = 1650    -- At what camera distance capital icons disappears
+"""
+
+
+def write_view_defines(out, report=None):
+    """The camera / label / flag defines (VIEW_DEFINES), as their own file so
+    the computed ones stay readable."""
+    _write(out / "common/defines/zz_map_tool_view.lua",
+           "-- Camera, map labels and flags (EarthToHoI4: hoi4mod.VIEW_DEFINES)\n" + VIEW_DEFINES)
+    if report is not None:
+        report["view_defines"] = sorted(re.findall(r"^NDefines\.\w+\.(\w+)", VIEW_DEFINES, re.M))
 
 
 # ------------------------------------------------------------------ lighting

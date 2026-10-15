@@ -76,10 +76,14 @@ after editing it (the header's refresh button does that).
 - A GADM unit whose states fit under 1.5 x the target becomes one state.
 - Every state one piece: a separate piece is kept only if most of it belongs
   to units whose body is in the main piece (real exclaves, islands).
-- State names: the GADM division (departements for France), cleaned
-  ("n.a." -> parent, Russian "rayon" dropped, Ukrainian raion adjectives ->
-  their town); repeated names told apart by parent or compass direction;
-  capital states that are the city itself take the capital's name.
+- Rivers cut provinces even where the branch cap deleted a pixel, and a
+  river's source is extended to its province border so the province it ends
+  in is cut too.
+- State names: GADM's own name for the division the state came from, used
+  verbatim -- that field is the romanized endonym (Bayern, Toscana, Fejer),
+  so nothing is cleaned, shortened or disambiguated and repeated names are
+  kept. The one exception: a division GADM leaves unnamed ("n.a.") takes its
+  parent's name.
 
 ## Provinces
 

@@ -9,6 +9,7 @@ Usage:
 import io
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections import OrderedDict
+from html import escape as html_escape
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -34,6 +36,7 @@ import city_names
 import climate
 import colormap
 import core
+import gmted
 import landcover
 import palettes
 import provinces
@@ -83,18 +86,34 @@ def _tile_files(url_for_tile):
 # "Topography and Bathymetry" color composite, which looks like a satellite
 # photo rather than a heightmap. Both are offered as their 8 full-resolution
 # tiles (A1-D2) so the whole globe can be downloaded at full detail.
+# Resources that are **alternatives to each other**: the Download tab draws
+# one card with a sub-tab per member instead of a card each, so it is plain
+# that only one of them is needed (user, 2026-10-15). A member carries
+# "group" and "tab_label"; the members of one group must sit together in
+# DOWNLOAD_RESOURCES, since the card takes the place of the first of them.
+DOWNLOAD_GROUPS = {
+    "elevation": {
+        "title": "Land elevations",
+        "description": "Heights for the heightmap, the sea level rise, the river mouths and the terrain's relief. "
+                       "<b>One of the two is enough</b> — the tool reads GMTED where its tiles are on disk and "
+                       "falls back to the NASA heightmap elsewhere, so having both only adds precision where GMTED is "
+                       "missing. “Download All” takes the NASA one.",
+        "default": "gmted",
+    },
+}
+
 DOWNLOAD_RESOURCES = [
     {
         "id": "gadm",
         "title": "GADM Shapefiles",
-        "description": "Global Administrative Areas boundaries for every country, all levels (the dataset this tool itself is built on). Automatically extracted after download.",
+        "description": "Country and subdivision borders, levels 0-5: the dataset this tool is built on. Extracted after download.",
         "source_url": "https://gadm.org/",
         "files": [{"label": None, "url": "https://geodata.ucdavis.edu/gadm/gadm3.6/gadm36_levels_shp.zip"}],
     },
     {
         "id": "blue_marble",
         "title": "NASA Blue Marble (August)",
-        "description": "Blue Marble: Next Generation cloud-free satellite composite for August, full resolution (500 m/pixel), as 8 tiles (A1-D2) covering the whole globe.",
+        "description": "Cloud-free satellite composite (August), 500 m/pixel, 8 tiles. The colour map's source.",
         "source_url": "https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-map",
         "files": _tile_files(lambda t:
             f"https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/august/world.200408.3x21600x21600.{t}.jpg"
@@ -103,11 +122,35 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "topography",
         "title": "NASA Topographic Heightmap",
-        "description": "Grayscale land-elevation heightmap (0-6400 m, black = sea level), full resolution (1 km/pixel), as 8 tiles (A1-D2) covering the whole globe. Not a satellite image.",
+        "group": "elevation",
+        "tab_label": "NASA heightmap",
+        "tab_note": "whole globe, coarse",
+        "description": "8-bit grey, 0-6400 m in steps of ~26.5 m, 1 km/pixel, 8 tiles. Enough for the exported heightmap, too coarse where real metres decide.",
         "source_url": "https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/topography-bathymetry-maps",
         "files": _tile_files(lambda t:
             f"https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/topography/gebco_08_rev_elev_{t}_grey_geo.jpg"
         ),
+    },
+    # GMTED2010 (USGS): land elevations in **metres**, 16-bit, in 30 x 20
+    # degree tiles -- the precise heightmap (see gmted.py). 15 arcsec is the
+    # resolution a country-sized frame actually resolves (a France map at
+    # 3840 px is 11.4 arcsec per pixel), and one tile is 69 MB, so the tiles
+    # are offered one by one and the whole set is left out of "Download All"
+    # ("in_all": False): 96 tiles would be 6.6 GB, and a map needs the two or
+    # three its own countries lie in. Whatever is missing falls back to the
+    # NASA topography above, so nothing breaks without them.
+    {
+        "id": "gmted",
+        "title": "GMTED2010 Land Elevations (15 arcsec, metres)",
+        "group": "elevation",
+        "tab_label": "GMTED2010",
+        "tab_note": "per tile, metres",
+        "description": "Real metres (16-bit), ~450 m, in 69 MB tiles named after their south-west corner: get the ones your maps cover (France = 30N000E + 50N000E). Land only, 84N-56S.",
+        "source_url": "https://topotools.cr.usgs.gov/gmted_viewer/index.html",
+        "in_all": False,
+        "files": [{"label": gmted.tile_name(lat, lon), "url": gmted.tile_url(lat, lon),
+                   "size_bytes": 69_236_676, "head": False}
+                  for lat, lon in gmted.tiles()],
     },
     # The same NASA Blue Marble set's ocean depths (GEBCO 08), same 8-tile
     # layout as the topography -- the Strategic regions' naval terrain
@@ -115,7 +158,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "bathymetry",
         "title": "NASA Bathymetry (ocean depth)",
-        "description": "Grayscale ocean-depth map (GEBCO 08 via NASA Blue Marble), full resolution (1 km/pixel), as 8 tiles (A1-D2) covering the whole globe, like the topography heightmap. Used for the strategic regions' naval terrain (shallow sea / ocean / deep ocean).",
+        "description": "Ocean depths (GEBCO 08), 1 km/pixel, 8 tiles. The strategic regions' naval terrain and the water colours.",
         "source_url": "https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/topography-bathymetry-maps",
         "files": _tile_files(lambda t:
             f"https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bathymetry/gebco_08_rev_bath_{t}_grey_geo.jpg"
@@ -131,7 +174,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "hydrosheds",
         "title": "HydroSHEDS (v1)",
-        "description": "HydroRIVERS: global river network (~8.5M segments) with long-term average discharge per segment (DIS_AV_CMS, m³/s). HydroLAKES: ~1.4M lakes and reservoirs of at least 10 ha, as polygons. Shapefiles, automatically extracted after download.",
+        "description": "Rivers: ~8.5M segments with their average discharge. Lakes: ~1.4M lakes and reservoirs from 10 ha up. Extracted after download.",
         "source_url": "https://www.hydrosheds.org/",
         "files": [
             {"label": "Rivers", "url": "https://data.hydrosheds.org/file/HydroRIVERS/HydroRIVERS_v10_shp.zip"},
@@ -148,7 +191,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "landcover",
         "title": "Copernicus Land Cover (100 m)",
-        "description": "Copernicus Global Land Service land cover map, 2015, 100 m resolution: one discrete class per pixel (forest types, shrubs, grassland, cropland, urban, bare, snow/ice, water, wetland, moss/lichen), single global GeoTIFF (EPSG:4326).",
+        "description": "One land class per 100 m pixel (forest types, shrubs, grassland, cropland, urban, bare, snow, wetland), 2015. The Terrain tab's source.",
         "source_url": "https://zenodo.org/records/3243509",
         "files": [
             {"label": None,
@@ -167,7 +210,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "cities",
         "title": "GeoNames Cities (population >= 1,000)",
-        "description": "Cities: every city, town and village with at least 1,000 inhabitants (~171,000 places): name, alternate names, feature code (capital, admin seat, ...), country, admin codes, population, coordinates (CSV). Names: every place's names tagged by language (all of GeoNames, kept zipped; the City tab keeps only its cities' names, a few MB) -- for city labels as endonyms or exonyms. Country info: each country's languages (which names are local).",
+        "description": "Cities: ~171,000 places of 1,000 inhabitants or more, with their population and coordinates. Names: every place's name per language, for the labels. Country info: each country's languages.",
         "source_url": "https://www.geonames.org/",
         "files": [
             {"label": "Cities",
@@ -192,7 +235,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "eez",
         "title": "Exclusive Economic Zones (Marine Regions)",
-        "description": "World EEZ v12 (Flanders Marine Institute, CC BY 4.0): every country's 200 NM exclusive economic zone, overlapping claims and joint regimes, plus internal waters (behind baselines: fjords, bays) and archipelagic waters. Shapefiles, extracted after download. Shown on the Countries tab's map as a light tint of each country's colour over its sea.",
+        "description": "Every country's 200 NM zone, plus internal and archipelagic waters. Draws the sea provinces and the sea regions; shown as a tint on the Countries tab.",
         "source_url": "https://www.marineregions.org/downloads.php",
         "files": [
             {"label": "EEZ", "url": "https://geo.vliz.be/geoserver/MarineRegions/wfs?service=WFS&version=1.0.0&request=GetFeature&outputFormat=SHAPE-ZIP&typeName=MarineRegions:eez", "filename": "eez.zip", "size_bytes": 118_171_225, "head": False},
@@ -208,7 +251,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "density",
         "title": "Population density (GHS-POP 1 km)",
-        "description": "JRC Global Human Settlement Layer GHS-POP R2023A: estimated population in 2025 on a 30 arc-second (~1 km) world grid (BigTIFF, extracted after download). The Provinces tab uses it as a density map: provinces get bigger where few people live (deserts, taiga, tundra).",
+        "description": "Population per ~1 km cell (2025 estimate). States and provinces get bigger where few people live.",
         "source_url": "https://human-settlement.emergency.copernicus.eu/download.php?ds=pop",
         "files": [{"label": None,
                    "url": "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_POP_GLOBE_R2023A/GHS_POP_E2025_GLOBE_R2023A_4326_30ss/V1-0/GHS_POP_E2025_GLOBE_R2023A_4326_30ss_V1_0.zip"}],
@@ -220,7 +263,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "population",
         "title": "Population by GADM subdivision (GHS-POP)",
-        "description": "JRC Global Human Settlement Layer: GHS-POP population (2025 estimate) summed for every GADM subdivision, all levels, as tables (GHS-DUC R2023A, keyed to GADM 4.1; matched to this tool's GADM 3.6, gaps split from the parent level by GeoNames places). Kept zipped; used for the States tab's state populations.",
+        "description": "The same population summed per GADM subdivision, as tables: each state's population and its manpower in the mod. Kept zipped.",
         "source_url": "https://human-settlement.emergency.copernicus.eu/download.php?ds=DUC",
         "files": [{"label": None, "extract": False,
                    "url": "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_DUC_GLOBE_R2023A/V2-0/GHS_DUC_MT_GLOBE_R2023A_V2_0.zip"}],
@@ -232,7 +275,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "climate",
         "title": "Climate normals (ERA5, monthly)",
-        "description": "ERA5 1991-2020 monthly climate normals on a 0.25-degree world grid (land and sea), from the World Bank Climate Change Knowledge Portal (CC BY 4.0): mean, daily minimum and daily maximum temperature, precipitation, frost days, ice days, days with 20 mm of rain or more, wind speed. One NetCDF file per variable. The Strategic regions tab averages them over each region to write its weather (temperatures, rain, snow, blizzards, mud, sandstorms, arctic water), calibrated on the game's own regions.",
+        "description": "ERA5 1991-2020 monthly normals: temperatures, rain, frost and ice days, wind. Each strategic region's weather is computed from them.",
         "source_url": "https://climateknowledgeportal.worldbank.org/download-data",
         "files": [{"label": label, "url": climate.URL.format(v=v), "size_bytes": 49_900_000}
                   for v, label in (("tas", "Mean temperature"), ("tasmin", "Daily minimum"),
@@ -244,7 +287,7 @@ DOWNLOAD_RESOURCES = [
     {
         "id": "flags",
         "title": "Country flags",
-        "description": "The real national flag of every country, 320 px wide PNG, from flagcdn.com (Wikimedia Commons' flags, mostly public domain). The HOI4 mod tab resizes them to the game's flag sizes for each exported country.",
+        "description": "Every country's real national flag, 320 px wide. The export resizes them to the game's flag sizes.",
         "source_url": "https://flagcdn.com",
         "files": [{"label": cc, "url": f"https://flagcdn.com/w320/{cc.lower()}.png", "size_bytes": 4000}
                   for cc in sorted(set(cities.COUNTRY_CONTINENT) | {"XK"})],
@@ -664,6 +707,145 @@ def index():
     return Response(INDEX_HTML, mimetype="text/html")
 
 
+# ------------------------------------------------------------------- manual
+# MANUAL.md holds every setting's long explanation; the UI keeps one short
+# line per control and links here (user, 2026-10-15: "move the long
+# descriptions to the doc & simplify a lot the UI"). It is served rather than
+# linked to GitHub so it works with no connection, which is how the rest of
+# the tool works once the data is downloaded.
+MANUAL_PATH = core.BASE_DIR / "MANUAL.md"
+_MANUAL_CSS = """
+  :root { --bg:#0d1016; --panel:#141821; --border:#262c38; --text:#e6e9ef;
+          --muted:#9aa3b2; --accent:#4a7fd4; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.65
+         -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:40px 24px 120px; }
+  h1 { font-size:28px; margin:0 0 8px; }
+  h2 { font-size:21px; margin:44px 0 10px; padding-top:14px;
+       border-top:1px solid var(--border); }
+  h3 { font-size:16px; margin:28px 0 8px; }
+  h4 { font-size:14px; margin:20px 0 6px; color:var(--muted); }
+  p, ul, ol, table, pre, blockquote { margin:0 0 14px; }
+  a { color:var(--accent); }
+  code { background:var(--panel); border:1px solid var(--border);
+         border-radius:4px; padding:1px 5px; font-size:0.88em; }
+  pre { background:var(--panel); border:1px solid var(--border);
+        border-radius:6px; padding:12px 14px; overflow-x:auto; }
+  pre code { background:none; border:none; padding:0; }
+  blockquote { border-left:3px solid var(--accent); background:var(--panel);
+               padding:10px 16px; border-radius:0 6px 6px 0; }
+  blockquote > :last-child { margin-bottom:0; }
+  ul { padding-left:22px; }
+  li { margin:3px 0; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th, td { border:1px solid var(--border); padding:6px 10px; text-align:left;
+           vertical-align:top; }
+  th { background:var(--panel); }
+  hr { border:none; border-top:1px solid var(--border); margin:36px 0; }
+  .back { display:inline-block; margin-bottom:22px; font-size:13.5px; }
+  h2:target, h3:target { scroll-margin-top:16px; color:#8ab4f8; }
+"""
+
+
+def _md_slug(text: str) -> str:
+    """GitHub's heading anchor: lowercase, punctuation dropped, spaces to -."""
+    s = re.sub(r"[^a-z0-9 -]", "", re.sub(r"<[^>]+>", "", text).lower())
+    return re.sub(r"\s+", "-", s.strip())
+
+
+def _md_inline(s: str) -> str:
+    s = html_escape(s)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"(?<![*\w])\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", s)
+    return re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", r'<a href="\2">\1</a>', s)
+
+
+def _md_html(text: str) -> str:
+    """The small Markdown subset MANUAL.md uses -> HTML: headings (anchored),
+    paragraphs, `- ` lists, `> ` quotes, pipe tables, indented code, rules."""
+    out, lines, i = [], text.split("\n"), 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        if not line.strip():
+            i += 1
+            continue
+        m = re.match(r"(#{1,6}) +(.*)$", line)
+        if m:
+            lv, body = len(m[1]), m[2]
+            anchor = f' id="{_md_slug(body)}"' if lv in (2, 3) else ""
+            out.append(f"<h{lv}{anchor}>{_md_inline(body)}</h{lv}>")
+            i += 1
+            continue
+        if re.fullmatch(r"-{3,}", line):
+            out.append("<hr>")
+            i += 1
+            continue
+        if line.startswith("|"):                      # table
+            rows = []
+            while i < len(lines) and lines[i].startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+                    rows.append(cells)
+                i += 1
+            if rows:
+                head = "".join(f"<th>{_md_inline(c)}</th>" for c in rows[0])
+                body = "".join("<tr>" + "".join(f"<td>{_md_inline(c)}</td>" for c in r) + "</tr>"
+                               for r in rows[1:])
+                out.append(f"<table><tr>{head}</tr>{body}</table>")
+            continue
+        if line.startswith(">"):                      # quote: the block, re-run
+            buf = []
+            while i < len(lines) and lines[i].startswith(">"):
+                buf.append(re.sub(r"^> ?", "", lines[i]))
+                i += 1
+            out.append("<blockquote>" + _md_html("\n".join(buf)) + "</blockquote>")
+            continue
+        if line.startswith("    "):                   # code
+            buf = []
+            while i < len(lines) and (lines[i].startswith("    ") or not lines[i].strip()):
+                buf.append(lines[i][4:])
+                i += 1
+            out.append("<pre><code>" + html_escape("\n".join(buf).strip("\n")) + "</code></pre>")
+            continue
+        if re.match(r"- +", line):                    # list; items may wrap
+            items = []
+            while i < len(lines) and (re.match(r"- +", lines[i]) or
+                                      (items and lines[i].startswith("  ") and lines[i].strip())):
+                if re.match(r"- +", lines[i]):
+                    items.append(re.sub(r"^- +", "", lines[i].strip()))
+                else:
+                    items[-1] += " " + lines[i].strip()
+                i += 1
+            out.append("<ul>" + "".join(f"<li>{_md_inline(it)}</li>" for it in items) + "</ul>")
+            continue
+        buf = []                                      # paragraph
+        while i < len(lines) and lines[i].strip() and not re.match(r"(#{1,6} |>|\||-{3,}$|    )", lines[i]):
+            buf.append(lines[i].strip())
+            i += 1
+        if buf:
+            out.append("<p>" + _md_inline(" ".join(buf)) + "</p>")
+        else:
+            i += 1
+    return "\n".join(out)
+
+
+@app.get("/manual")
+def manual():
+    """MANUAL.md as a page, with an anchor per heading (the UI links to them)."""
+    try:
+        text = MANUAL_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return Response("<h1>MANUAL.md is missing</h1>", mimetype="text/html", status=404)
+    return Response(
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>EarthToHoI4 manual</title><style>' + _MANUAL_CSS + '</style></head>'
+        '<body><div class="wrap"><a class="back" href="/">&larr; back to EarthToHoI4</a>'
+        + _md_html(text) + '</div></body></html>', mimetype="text/html")
+
+
 @app.get("/api/downloads")
 def api_downloads():
     # Files with a listed size aren't asked (a WFS export would be built
@@ -696,7 +878,8 @@ def api_downloads():
                           "downloaded": downloaded, "state": state})
         sized = [f["size_bytes"] for f in files if f["size_bytes"] is not None]
         total = sum(sized) if len(sized) == len(files) else None
-        result.append({**r, "files": files, "total_size_bytes": total})
+        result.append({**r, "files": files, "total_size_bytes": total,
+                       "group_info": DOWNLOAD_GROUPS.get(r.get("group"))})
     return jsonify(result)
 
 
@@ -710,6 +893,8 @@ def api_downloads_start():
     for r in DOWNLOAD_RESOURCES:
         if resource_id != "all" and r["id"] != resource_id:
             continue
+        if resource_id == "all" and r.get("in_all") is False:
+            continue          # a set downloaded tile by tile, as a map needs them (GMTED)
         for f in r["files"]:
             if label is not None and f.get("label") != label:
                 continue
@@ -1040,7 +1225,7 @@ def _render_base_from_args():
     big = request.args.get("big", "0") in ("1", "true")
     # "big" (double size) only enters the key when on: normal-size renders keep their cached results
     k = result_cache.key("render", [request.args.get(p, "") for p in _RENDER_PARAMS] + (["big"] if big else []),
-                         land_sea, _data_sig("gadm", "hydrosheds", "topography"))
+                         land_sea, _data_sig("gadm", "hydrosheds", "topography", "gmted"))
     color_config = False
 
     def _compute():
@@ -1246,8 +1431,8 @@ def api_landsea_settings():
         "mask_colors": {k: core.rgb_to_hex(v) for k, v in core.MASK_COLORS.items()},
         "lakes_available": core.LAKES_SHAPEFILE_PATH.exists(),
         # fetched once at start-up, so it is also what tells the Countries
-        # tab's sea level control whether the topography is downloaded
-        "topography_available": core.topography_available(),
+        # tab's sea level control whether any elevations are downloaded
+        "topography_available": core.elevation_available(),
     })
 
 
@@ -1358,8 +1543,9 @@ def _rivers_from_args():
     # country map is recoloured like the render
     img, meta, _debug, pairs = _render_colored_from_args()
     bimg, _bmeta, bdebug = _render_base_from_args()
+    # topography: the mouth extensions follow the ground (core._elevation_route)
     k = result_cache.key("rivers", _ck(bimg), sorted(pct.items()), min_len, spacing, sorted(flags.items()),
-                         max_branches, _data_sig("hydrosheds", "river_borders.json"))
+                         max_branches, _data_sig("hydrosheds", "river_borders.json", "topography", "gmted"))
 
     def compute():
         rivers, report = core.render_rivers(bimg, bdebug, pct, min_len, spacing,
@@ -1403,6 +1589,7 @@ def api_rivers_meta():
         _img, report, meta, _countries = _rivers_from_args()
     except (core.RenderError, core.DataNotFoundError) as e:
         return jsonify({"error": str(e)}), 400
+    report = {k_: v for k_, v in report.items() if k_ != "network_cut_px"}
     return jsonify({"rivers": report, "countries": meta["countries"], "width": meta["width"],
                     "height": meta["height"],
                     "colors": {"land": core.rgb_to_hex(core.RIVER_PALETTE[core.RIVER_LAND]),
@@ -1560,36 +1747,29 @@ def api_cities_csv():
 
 
 # ---------- heightmap tab ----------
-_height_cache = OrderedDict()
-
-
 _height_levels_cache = OrderedDict()
 
 
 def _heightmap_from_args():
-    """(raw heightmap, report, meta, country image, HOI4 heightmap, normal
-    map) for the request's view: the NASA topography reprojected onto the
-    Countries tab's frame (the last 2 renders), then HOI4 levels + normal
-    map per relief= strength (core.exaggerate_relief; 1 = off, last 4 kept)."""
-    try:
-        relief = float(request.args.get("relief", core.RELIEF_STRENGTH_DEFAULT))
-    except ValueError:
-        raise core.RenderError("The relief exaggeration must be a number")
-    if not 1.0 <= relief <= core.RELIEF_STRENGTH_MAX:
-        raise core.RenderError(f"The relief exaggeration must be between 1 (off) and {core.RELIEF_STRENGTH_MAX:g}")
+    """(elevations in metres, report, meta, country image, HOI4 heightmap,
+    normal map) for the request's view: core.elevation_m on the Countries
+    tab's frame (GMTED where its tiles are downloaded, the NASA heightmap
+    elsewhere), then HOI4 levels + normal map per relief= strength
+    (core.exaggerate_relief; 1 = off, last 4 kept)."""
+    relief = core.normalize_relief(request.args)
     img, meta, debug = _render_detailed_from_args()
-    hm, report = _raw_heightmap(img, debug)
-    k = result_cache.key("height_levels", _ck(hm), round(relief, 3))
+    z, report = _elevation(img, debug)
+    k = result_cache.key("height_levels", _ck(img), _data_sig("topography", "gmted"), sorted(relief.items()))
 
     def compute():
         rep = dict(report)
-        hoi4 = core.hoi4_heightmap(hm, img, debug, relief_strength=relief, report=rep) \
-            if report.get("available") else hm
-        normal = core.hoi4_normal_map(hoi4) if report.get("available") else None
-        return rep, (None if hoi4 is hm else hoi4), normal
+        if not report.get("available"):
+            return rep, None, None
+        hoi4 = core.hoi4_heightmap(z, img, debug, relief_strength=relief["relief"], report=rep, relief=relief)
+        return rep, hoi4, core.hoi4_normal_map(hoi4)
     with _render_lock:
         rep, hoi4, normal = _stage_get(_height_levels_cache, 4, "height_levels", k, compute)
-        return hm, rep, meta, img, (hoi4 if hoi4 is not None else hm), normal
+        return z, rep, meta, img, hoi4, normal
 
 
 @app.get("/api/heightmap/meta")
@@ -1606,20 +1786,24 @@ def api_heightmap_meta():
 @app.get("/api/heightmap/image")
 def api_heightmap_image():
     """PNG of the heightmap (8-bit grey): mode=hoi4 (default) in HOI4's
-    heightmap.bmp levels (core.hoi4_heightmap), mode=raw the reprojected
-    NASA values, mode=normal the normal map (world_normal.bmp, half size);
-    overlay=1 draws the country map's coastlines and borders on it in red
-    (not on the normal map); download=1 sends it as a file."""
+    heightmap.bmp levels (core.hoi4_heightmap), mode=raw the elevations
+    themselves (metres, stretched over the frame's own range -- 16-bit where
+    GMTED covers the view), mode=normal the normal map (world_normal.bmp,
+    half size); overlay=1 draws the country map's coastlines and borders on
+    it in red (not on the normal map); download=1 sends it as a file."""
     try:
-        raw, _report, _meta, img, hoi4, normal = _heightmap_from_args()
+        z, _report, _meta, img, hoi4, normal = _heightmap_from_args()
     except (core.RenderError, core.DataNotFoundError) as e:
         return jsonify({"error": str(e)}), 400
     mode = request.args.get("mode")
+    raw = _grey_of_metres(z) if mode == "raw" and z is not None else None
     if mode == "normal":
         if normal is None:
-            return jsonify({"error": "The topography is not downloaded (Download tab -> Topography)"}), 400
+            return jsonify({"error": core.elevation_missing_message()}), 400
         return _png_response(normal) if request.args.get("download") not in ("1", "true") else             send_file(_image_buffer(normal, "PNG"), mimetype="image/png", as_attachment=True,
                       download_name="world_normal.png")
+    if mode != "raw" and hoi4 is None:
+        return jsonify({"error": core.elevation_missing_message()}), 400
     hm = raw if mode == "raw" else hoi4
     if request.args.get("overlay") in ("1", "true"):
         hm = core.heightmap_overlay(hm, img)
@@ -1638,8 +1822,8 @@ def api_heightmap_bmp():
         _raw, report, _meta, _img, hoi4, _normal = _heightmap_from_args()
     except (core.RenderError, core.DataNotFoundError) as e:
         return jsonify({"error": str(e)}), 400
-    if not report.get("available"):
-        return jsonify({"error": "The topography is not downloaded (Download tab -> Topography)"}), 400
+    if not report.get("available") or hoi4 is None:
+        return jsonify({"error": core.elevation_missing_message()}), 400
     buf = io.BytesIO()
     hoi4.save(buf, format="BMP")
     buf.seek(0)
@@ -1662,7 +1846,7 @@ def api_heightmap_normal_bmp():
     except (core.RenderError, core.DataNotFoundError) as e:
         return jsonify({"error": str(e)}), 400
     if normal is None:
-        return jsonify({"error": "The topography is not downloaded (Download tab -> Topography)"}), 400
+        return jsonify({"error": core.elevation_missing_message()}), 400
     return send_file(_image_buffer(normal, "BMP"), mimetype="image/bmp", as_attachment=True,
                      download_name="world_normal.bmp")
 
@@ -1687,8 +1871,10 @@ def _states_from_args(full=False):
     img, meta, debug = _render_detailed_from_args()
     rivers = None
     countries = img
+    cut_px = None
     if settings["rivers"]:
-        rivers, _rrep, _rmeta, countries = _rivers_from_args()
+        rivers, rrep, _rmeta, countries = _rivers_from_args()
+        cut_px = rrep.get("network_cut_px")   # the branch cap's gaps, healed for the province rules
     # before taking the lock: _province_density takes it too (not re-entrant --
     # calling it inside deadlocked the States render)
     dens = _province_density(img, debug)
@@ -1703,7 +1889,7 @@ def _states_from_args(full=False):
         simg, report, labels = _stage_get(_state_cache, 2, "states", k, compute)
         _stamp(simg, k)
     if full:
-        return simg, report, meta, img, countries, rivers, labels, debug
+        return simg, report, meta, img, countries, rivers, labels, debug, cut_px
     return simg, report, meta
 
 
@@ -1717,7 +1903,7 @@ def _provinces_from_args(full=False):
     sea_min / sea_max; last 2 kept. The terrain comes from the Terrain tab's
     render when it can be made (else provinces are "plains", reported)."""
     settings = provinces.normalize_settings({k: request.args.get(k) for k in list(provinces.PROVINCE_DEFAULTS) + ["country_factors"]})
-    simg, sreport, meta, img, countries, rivers, labels, debug = _states_from_args(full=True)
+    simg, sreport, meta, img, countries, rivers, labels, debug, cut_px = _states_from_args(full=True)
     # City provinces: the City tab's cities (its settings come along)
     city_points = _city_points_for_terrain(img, meta, debug, names=True) if settings["city_provinces"] else None
     timg = None
@@ -1730,6 +1916,7 @@ def _provinces_from_args(full=False):
         terrain_note = str(e)
     k = result_cache.key("provinces", _ck(simg), _ck(timg), settings, terrain_note,
                          None if city_points is None else result_cache.digest(city_points),
+                         sorted(map(tuple, cut_px or ())),
                          _data_sig("density", "eez", "hydrosheds"))
     with _render_lock:
         cached = k in _province_cache or result_cache.exists("provinces", k)
@@ -1742,7 +1929,8 @@ def _provinces_from_args(full=False):
                                       core.load_land_sea_settings().get("lake_min_px", 8))
         pimg, report, definition = provinces.render_provinces(countries, debug, labels, sreport, rivers, timg,
                                                               settings, eez_zones=zones, density_img=dens,
-                                                              lake_ids=lake_ids, city_points=city_points)
+                                                              lake_ids=lake_ids, city_points=city_points,
+                                                              river_cut_px=cut_px)
         if terrain_note:
             report["terrain_source"] = "none (" + terrain_note + "): plains"
         states_csv = report.pop("_states_csv")
@@ -1919,7 +2107,7 @@ def api_cache():
 def api_cache_clear():
     """Deletes every cached result on disk and in memory."""
     with _render_lock:
-        for c in (_render_cache, _recolor_cache, _fitted_recolor_cache, _eez_cache, _eez_tint_cache, _river_cache, _city_cache, _height_cache, _height_levels_cache,
+        for c in (_render_cache, _recolor_cache, _fitted_recolor_cache, _eez_cache, _eez_tint_cache, _river_cache, _city_cache, _elevation_cache, _height_levels_cache,
                   _state_cache, _province_cache, _prov_aux_cache, _strategic_cache, _terrain_cache, _colormap_cache):
             c.clear()
     return jsonify({"deleted": result_cache.clear()})
@@ -2036,14 +2224,27 @@ def api_states_csv():
 _terrain_cache = OrderedDict()
 
 
-def _raw_heightmap(img, debug):
-    """The NASA topography reprojected onto a render (shared by the
-    Heightmap and Terrain tabs)."""
-    k = result_cache.key("heightmap", _ck(img), _data_sig("topography"))
+def _grey_of_metres(z):
+    """The metre elevations as an 8-bit picture, stretched over the frame's
+    own range: the Heightmap tab's "raw" view, since the source is metres now
+    and has no fixed 0-255 scale to show."""
+    a = np.asarray(z, dtype=np.float32)
+    lo, hi = float(a.min()), float(a.max())
+    return Image.fromarray(np.clip((a - lo) / max(hi - lo, 1e-9) * 255.0, 0, 255).astype(np.uint8), mode="L")
+
+
+_elevation_cache = OrderedDict()
+
+
+def _elevation(img, debug):
+    """The render's elevations in **metres** (core.elevation_m: GMTED where
+    its tiles are downloaded, the NASA heightmap elsewhere) -- what the HOI4
+    heightmap levels, the Terrain tab's relief, the river mouths and the sea
+    level rise are all built on. Shared by the tabs that need heights."""
+    k = result_cache.key("elevation", _ck(img), _data_sig("topography", "gmted"))
     with _render_lock:
-        hm, report = _stage_get(_height_cache, 2, "heightmap", k, lambda: core.render_heightmap(debug))
-        _stamp(hm, k)
-        return hm, report
+        z, report = _stage_get(_elevation_cache, 2, "elevation", k, lambda: core.elevation_m(debug))
+        return z, report
 
 
 class _Preparing(Exception):
@@ -2056,34 +2257,31 @@ def _terrain_from_args():
     terrain.TERRAIN_DEFAULTS); last 2 kept."""
     settings = terrain.normalize_settings({k: request.args.get(k) for k in terrain.TERRAIN_DEFAULTS})
     # Relief source: the Heightmap tab's heights, lower ranges exaggerated
-    # by its current factor (relief=, as on the Heightmap tab).
-    try:
-        relief = float(request.args.get("relief", core.RELIEF_STRENGTH_DEFAULT))
-    except ValueError:
-        raise core.RenderError("The relief exaggeration must be a number")
-    if not 1.0 <= relief <= core.RELIEF_STRENGTH_MAX:
-        raise core.RenderError(f"The relief exaggeration must be between 1 (off) and {core.RELIEF_STRENGTH_MAX:g}")
+    # with its current settings (relief= and the shape, as on that tab).
+    relief = core.normalize_relief(request.args)
     if not landcover.available():
         raise core.RenderError(landcover.missing_message())
     if not landcover.pyramid_ready():
         landcover.start_build()
         raise _Preparing()
-    if not core.topography_available():
-        raise core.RenderError("The topography isn't downloaded (Download tab -> NASA Topographic Heightmap)")
+    if not core.elevation_available():
+        raise core.RenderError("The elevations aren't downloaded (Download tab -> GMTED2010 land "
+                               "elevations, or NASA Topographic Heightmap)")
     img, meta, debug = _render_detailed_from_args()
-    hm, _hm_report = _raw_heightmap(img, debug)
+    hm, _hm_report = _elevation(img, debug)
     # Urban discs at the City tab's largest cities (its settings come along).
     points = _city_points_for_terrain(img, meta, debug) if settings["city_discs"] else None
-    k = result_cache.key("terrain", _ck(img), _ck(hm), settings, round(relief, 3),
+    k = result_cache.key("terrain", _ck(img), _data_sig("topography", "gmted"), settings, sorted(relief.items()),
                          None if points is None else result_cache.digest(points),
                          _data_sig("landcover", "landcover/pyramid", "cities"))
 
     def compute():
-        height, _gain, _kpp = core.exaggerated_height(hm, img, debug, relief)
+        height, _gain, _kpp = core.exaggerated_height(hm, img, debug, relief["relief"], relief)
         timg, report, lcimg = terrain.render_terrain(img, debug, height, settings, city_points=points)
         report["cities_available"] = cities.available()
         report["trees_image"] = report.pop("_trees_image")
-        report["relief_strength"] = relief
+        report.update({k: float(v) for k, v in relief.items()})
+        report["relief_strength"] = relief["relief"]
         return timg, report, lcimg
     with _render_lock:
         timg, report, lcimg = _stage_get(_terrain_cache, 2, "terrain", k, compute)
@@ -2220,7 +2418,7 @@ def _hoi4_sources():
     rivers, _rrep, _rmeta, countries = _rivers_from_args()
     _hm, hrep, _m, _i, hoi4h, normal = _heightmap_from_args()
     if not hrep.get("available"):
-        raise core.RenderError("The topography isn't downloaded (Download tab -> NASA Topographic Heightmap)")
+        raise core.RenderError(core.elevation_missing_message())
     timg, trep, _tm, _lc = _terrain_from_args()
     try:
         cm, _crep = _colormap_from_args()

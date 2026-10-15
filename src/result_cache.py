@@ -34,17 +34,18 @@ ENABLED = os.environ.get("MAP_TOOL_NO_RESULT_CACHE", "") == ""
 # stage -> the modules its result depends on (its own code only: upstream
 # stages are covered by their content keys inside this stage's key)
 STAGE_CODE = {
-    "render": ("core.py", "palettes.py"),
+    "render": ("core.py", "palettes.py", "gmted.py"),   # gmted: the sea level rise reads elevations
     "recolor": ("core.py", "palettes.py"),   # the render's colours (memory only, see app._render_colored_from_args)
     "eez_zones": ("eez.py", "states.py"),
     "eez_overlay": ("eez.py", "states.py"),
-    "rivers": ("core.py",),
+    "rivers": ("core.py", "gmted.py"),                  # the mouths follow the ground
     "cities": ("cities.py", "city_names.py"),
     "heightmap": ("core.py",),
-    "height_levels": ("core.py",),
+    "elevation": ("core.py", "gmted.py"),
+    "height_levels": ("core.py", "gmted.py"),
     "density": ("density.py",),
     "states": ("states.py", "population.py", "density.py"),
-    "terrain": ("terrain.py", "landcover.py", "core.py"),
+    "terrain": ("terrain.py", "landcover.py", "core.py", "gmted.py"),
     "colormap": ("colormap.py",),
     "province_eez": ("eez.py", "states.py"),
     "provinces": ("provinces.py", "states.py", "terrain.py", "core.py"),

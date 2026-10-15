@@ -2146,15 +2146,17 @@ WORLD_WRAP_BAND_PX = 1
 # separation, strait fixing, speck filling and the sieve all clean up the
 # new coastline (user: "the cleanup must happen afterwards").
 #
-# The elevation is the **raw NASA topography** (render_heightmap, the
-# Heightmap tab's source), never the exaggerated HOI4 heights: the
-# exaggeration is cosmetic (it makes the Scandes look like the Alps) and
-# would drown the wrong land. NASA's grey is ~linear at NASA_M_PER_UNIT
-# (~26.5 m) per step and clipped to whole steps, so the rise lands on the
-# nearest step: anything under ~13 m goes at the first one, then in jumps
-# of ~26.5 m. The depth of the water now standing over the drowned land is
-# kept per pixel (debug["drowned_depth"], uint16 metres) -- the bathymetry
-# has no soundings there, it is land to GEBCO (see drowned_depth_m).
+# The elevation is the **real ground** (elevation_m), never the exaggerated
+# HOI4 heights: the exaggeration is cosmetic (it makes the Scandes look like
+# the Alps) and would drown the wrong land. With GMTED's tiles downloaded
+# that is metres, so a 1 m rise means 1 m; on the 8-bit NASA fallback the
+# grey is ~linear at NASA_M_PER_UNIT (~26.5 m) per step and clipped to whole
+# steps, so the rise lands on the nearest one -- anything under ~13 m goes at
+# the first step (measured against GMTED: a 1 m rise then drowns 86% of the
+# Camargue and 98% of coastal Flanders), then in jumps of ~26.5 m. The report
+# carries which source answered. The depth of the water now standing over the
+# drowned land is kept per pixel (debug["drowned_depth"], uint16 metres) --
+# the bathymetry has no soundings there, it is land to GEBCO (drowned_depth_m).
 SEA_LEVEL_MAX_M = 8000
 
 
@@ -2162,19 +2164,19 @@ def drown_land(canvas, hidden_land, poly_labels, view, rise_m):
     """Drown every land pixel of `canvas` whose real elevation is at or
     below `rise_m` metres. Modifies canvas / hidden_land / poly_labels in
     place; returns (report, drowned mask, depth in metres as uint16)."""
-    if not topography_available():
-        raise RenderError("Raising the sea level needs the elevations: download the NASA topography "
-                          "from the Download tab (NASA Topographic Heightmap).")
+    if not elevation_available():
+        raise RenderError("Raising the sea level needs the elevations: download GMTED2010 (for metre "
+                          "precision) or the NASA topography from the Download tab.")
     t0 = time.time()
     rise_m = float(rise_m)
-    grey = np.asarray(render_heightmap({"view": view})[0], dtype=np.float32)
+    z, zrep = elevation_m({"view": view})
     land = ~(canvas == np.asarray(BACKGROUND_COLOR, dtype=canvas.dtype)).all(axis=2)
     if hidden_land is not None:
         land |= hidden_land
     land_px = int(land.sum())
-    drowned = land & (grey * NASA_M_PER_UNIT <= rise_m)
+    drowned = land & (z <= rise_m)
     depth = np.zeros(drowned.shape, dtype=np.uint16)
-    depth[drowned] = np.clip(np.rint(rise_m - grey[drowned] * NASA_M_PER_UNIT), 0, 65535).astype(np.uint16)
+    depth[drowned] = np.clip(np.rint(rise_m - z[drowned]), 0, 65535).astype(np.uint16)
     canvas[drowned] = BACKGROUND_COLOR
     if hidden_land is not None:
         hidden_land &= ~drowned
@@ -2183,7 +2185,9 @@ def drown_land(canvas, hidden_land, poly_labels, view, rise_m):
     n = int(drowned.sum())
     report = {"enabled": True, "sea_level_m": round(rise_m, 1), "drowned_px": n, "land_px_before": land_px,
               "drowned_share": round(n / land_px, 4) if land_px else 0.0,
-              "step_m": round(NASA_M_PER_UNIT, 1),
+              "elevation": zrep.get("source"), "gmted_share": zrep.get("gmted_share"),
+              "gmted_arcsec": zrep.get("gmted_arcsec"),
+              "step_m": 1.0 if zrep.get("gmted_share") == 1.0 else round(NASA_M_PER_UNIT, 1),
               "max_depth_m": int(depth.max()) if n else 0,
               "seconds": round(time.time() - t0, 2)}
     return report, drowned, (depth if n else None)
@@ -4231,6 +4235,34 @@ RIVER_LAKE_TOL_DEG = 0.02  # an inland river end within ~2 km of a HydroLAKES la
 # for the Amazon/Para estuary, Sao Marcos bay, Rhine-Meuse delta, Flevoland,
 # Szczecin lagoon (checked); a few px elsewhere.
 RIVER_MOUTH_MAX_GAP_PX = 100
+# Where that extension goes is a question about the ground, not about pixels,
+# so it follows the elevation the way the user's own river generator does
+# (Documents/Ring World/River Work, river_editor.py Terrain._dijkstra): the
+# cheapest route, where a step costs its length, plus RIVER_SEA_CLIMB_PX_PER_M
+# px per metre it climbs (UPHILL_COST there), plus up to
+# RIVER_SEA_LOW_GROUND_COST for being high above the lowest ground around
+# (that editor has a drainage raster and charges up to VALLEY_COST for leaving
+# the drainage lines; here the heights are all there is, so the valley floor
+# is "the lowest ground in the window"), plus, where the ground is flat and
+# the cost would otherwise draw a ruler-straight line, smooth noise worth
+# RIVER_SEA_MEANDER_COST so the river wanders a little (its FLAT_NOISE).
+# Heights are the **raw NASA topography** in metres, like the sea level rise:
+# the HOI4 exaggeration is cosmetic and would invent slopes. They are coarse
+# -- NASA_M_PER_UNIT (~26.5 m) per step -- so a coastal plain reads as
+# perfectly flat and only the noise term is left to shape the route, which is
+# the honest answer: at that resolution there is no relief there to follow.
+RIVER_SEA_CLIMB_PX_PER_M = 1.0
+RIVER_SEA_LOW_GROUND_COST = 3.0
+RIVER_SEA_MEANDER_COST = 2.5
+RIVER_SEA_MEANDER_SCALES = (1.5, 4.0)   # px: the sizes of the noise features
+RIVER_SEA_MEANDER_SEED = 7
+# ... and how far round it may go to get there: route pixels per pixel of
+# straight line to the water it reaches. On the user's France map every
+# sound extension is within x1.53 (x1.41 = a diagonal staircase) and the one
+# that looped back alongside its own river was x6.20 -- 149 px of route for
+# 24 px of straight line, up a valley and back down another.
+RIVER_MOUTH_MAX_DETOUR = 2.5
+RIVER_MOUTH_DETOUR_SLACK_PX = 6   # a couple of pixels of gap are never a detour
 
 
 def _segment_last_points(index, segs):
@@ -4945,6 +4977,70 @@ def _bfs_path(passable, start, goal):
     return None
 
 
+def _elevation_route(passable, goal, start, z):
+    """Cheapest 4-connected path in a window from `start` (row, col) to the
+    cheapest `goal` pixel, over `passable` pixels (a goal pixel needn't be
+    passable, and no path goes *through* one -- a route may not cross the
+    water to reach water further out). `z` = the window's heights in metres.
+
+    Stepping into a pixel costs
+        1 (the step's length)
+      + RIVER_SEA_CLIMB_PX_PER_M x the metres it climbs
+      + RIVER_SEA_LOW_GROUND_COST x how high it lies between the lowest and
+        the highest ground in the window (0 where the window is flat)
+      + RIVER_SEA_MEANDER_COST x smooth noise, only where the ground around
+        it has no relief at all.
+    So the route runs down the lowest ground it can find, goes round a ridge
+    unless the detour costs more than the climb, and, where the heights say
+    nothing, wanders instead of drawing a straight line (see
+    RIVER_SEA_CLIMB_PX_PER_M). Same shape of answer as `_bfs_path`: the
+    pixels after `start`, the goal included, or None.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    h, w = passable.shape
+    node = passable | goal
+    node[start] = True              # the river's own last pixel is where this starts from
+    if not goal.any():
+        return None
+    z = np.asarray(z, dtype=np.float32)
+    lo, hi = float(z[node].min()), float(z[node].max())
+    extra = np.zeros((h, w), dtype=np.float32)
+    if hi > lo:
+        extra += RIVER_SEA_LOW_GROUND_COST * (z - lo) / (hi - lo)
+    # the noise only where the ground is flat: with relief to follow, the
+    # heights decide, and a wander over a ridge would be nonsense
+    flat = ndimage.maximum_filter(z, size=5) - ndimage.minimum_filter(z, size=5) <= 0.0
+    if flat.any():
+        rng = np.random.default_rng(RIVER_SEA_MEANDER_SEED)
+        noise = np.zeros((h, w), dtype=np.float32)
+        for scale in RIVER_SEA_MEANDER_SCALES:
+            f = ndimage.gaussian_filter(rng.standard_normal((h, w)).astype(np.float32), scale)
+            noise += f / (float(f.std()) + 1e-9)
+        noise -= noise.min()
+        extra += RIVER_SEA_MEANDER_COST * flat * (noise / (float(noise.max()) + 1e-9))
+    rows, cols, wts = [], [], []
+    idx = np.arange(h * w).reshape(h, w)
+    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        sr, sc = slice(max(0, -dr), h - max(0, dr)), slice(max(0, -dc), w - max(0, dc))
+        tr, tc = slice(max(0, dr), h + min(0, dr)), slice(max(0, dc), w + min(0, dc))
+        ok = node[sr, sc] & node[tr, tc] & ~goal[sr, sc]      # never on through water
+        rows.append(idx[sr, sc][ok])
+        cols.append(idx[tr, tc][ok])
+        wts.append((1.0 + RIVER_SEA_CLIMB_PX_PER_M * np.maximum(z[tr, tc] - z[sr, sc], 0.0)
+                    + extra[tr, tc])[ok])
+    g = csr_matrix((np.concatenate(wts), (np.concatenate(rows), np.concatenate(cols))), shape=(h * w, h * w))
+    dist, pred = dijkstra(g, indices=start[0] * w + start[1], return_predecessors=True)
+    cand = np.flatnonzero(goal.ravel() & np.isfinite(dist))
+    if not len(cand):
+        return None
+    out, i = [], int(cand[np.argmin(dist[cand])])
+    while i >= 0:
+        out.append((i // w, i % w))
+        i = int(pred[i])
+    return out[-2::-1]        # after `start`, the goal last
+
+
 def _near_others(owner, k, r0, r1, c0, c1):
     """Window mask: pixels within 1 px (8-neighbourhood) of a river other than k."""
     win = owner[r0:r1, c0:c1]
@@ -5362,18 +5458,40 @@ def _pull_rivers_into_lakes(owner, painted, parent, lakes, allowed):
     return n_done, pulled
 
 
-def _extend_strokes_to_sea(owner, painted, mouths, sea, lakes, allowed):
+def _extend_strokes_to_sea(owner, painted, mouths, sea, lakes, allowed, heights=None):
     """Continue every river that should reach the sea (ocean outlets) but
     whose last drawn pixel doesn't touch it -- GADM's coast (the map) runs
-    past HydroSHEDS' (the rivers) in deltas, estuaries and polders -- along
-    the shortest path to the sea within RIVER_MOUTH_MAX_GAP_PX that keeps
-    the river rule: never within 1 px of another river, nor of the river
-    itself (so neighbouring mouths don't merge). Rivers ending next to a
-    lake (a lagoon) count as having reached water. In place; returns
-    (rivers extended, pixels added)."""
+    past HydroSHEDS' (the rivers) in deltas, estuaries and polders -- to the
+    sea within RIVER_MOUTH_MAX_GAP_PX, keeping the river rule: never within
+    1 px of another river, nor of the river itself (so neighbouring mouths
+    don't merge). Rivers ending next to a lake (a lagoon) count as having
+    reached water.
+
+    **`heights`** (the frame's raw NASA topography, 0-255 as
+    `render_heightmap` gives it, or metres as a float array): the route then
+    follows the ground -- downhill along the lowest way to the water, round a
+    ridge rather than over it, wandering where the ground is flat
+    (`_elevation_route`, the cost model of the user's own river generator;
+    see RIVER_SEA_CLIMB_PX_PER_M). Without it the route is the one with the
+    fewest pixels (`_bfs_path`), which draws a straight line across whatever
+    lies in the way.
+
+    A mouth whose only route is more than `RIVER_MOUTH_MAX_DETOUR` times the
+    straight line to the water is left alone -- it ends inland.
+
+    In place; returns (rivers extended, pixels added, mouths left for the
+    water being too far round)."""
     h, w = owner.shape
     gap = RIVER_MOUTH_MAX_GAP_PX
-    n_ext = added = 0
+    z = None
+    if heights is not None:
+        raw = np.asarray(heights)
+        if raw.shape != owner.shape:
+            raise RenderError(f"the heights are {raw.shape[1]}x{raw.shape[0]}, the map {w}x{h}")
+        z = raw.astype(np.float32)
+        if raw.dtype == np.uint8:                   # NASA grey -> metres
+            z *= NASA_M_PER_UNIT
+    n_ext = added = n_far = 0
     for k in mouths:
         if k not in painted:
             continue
@@ -5390,8 +5508,22 @@ def _extend_strokes_to_sea(owner, painted, mouths, sea, lakes, allowed):
             continue
         passable = (allowed[r0:r1, c0:c1] & (owner[r0:r1, c0:c1] == -1)
                     & ~_near_others(owner, k, r0, r1, c0, c1) & ~_own_near(path, 2, r0, r1, c0, c1))
-        det = _bfs_path(passable, (r - r0, c - c0), sea_w)
+        det = (_elevation_route(passable, sea_w, (r - r0, c - c0), z[r0:r1, c0:c1]) if z is not None
+               else _bfs_path(passable, (r - r0, c - c0), sea_w))
         if det is None:
+            continue
+        # A mouth that only reaches water the long way round is not a mouth:
+        # the river really does end inland, and drawing it there sends it
+        # **snaking back alongside its own course** -- the loop the user
+        # found on the France map, 149 px of route for 24 px of straight
+        # line. Every other extension on that map is within x1.53 of the
+        # straight line (x1.41 is a plain diagonal staircase), so the cap
+        # separates them cleanly. The shortest-path router needs it just as
+        # much: it drew the same snake, which _remove_straight_rivers then
+        # threw away *with the whole river*.
+        far = float(np.hypot(det[-1][0] - (r - r0), det[-1][1] - (c - c0)))
+        if len(det) > max(RIVER_MOUTH_DETOUR_SLACK_PX, RIVER_MOUTH_MAX_DETOUR * far):
+            n_far += 1
             continue
         # The last step is the sea pixel itself. The search keeps clear of
         # the river's path but its last 2 pixels, so only that tail + the
@@ -5408,7 +5540,7 @@ def _extend_strokes_to_sea(owner, painted, mouths, sea, lakes, allowed):
         if det:
             n_ext += 1
             added += len(det)
-    return n_ext, added
+    return n_ext, added, n_far
 
 
 def _remove_short_strokes(owner, painted, parent_of, path_dis, min_len: int):
@@ -5761,13 +5893,18 @@ def _split_big_networks(out, owner, water=None, max_branches=RIVER_MAX_BRANCHES_
     A cut deletes one pixel of a stretch, taken **beside the junction** --
     the tributary's last pixel before it meets its parent -- so the gap is
     hidden at the confluence and the junction loses a branch with it. Called
-    before the one-source-per-network rule, which then gives each new piece
-    its own green source. Returns the number of cuts.
+    before the one-source-per-network rule, which then re-sources every piece
+    the cuts make (see `_main_stem_source`).
+
+    Returns (cuts, [(y, x) of every deleted pixel]). The pixel list is what
+    `report["network_cut_px"]` carries on to the Provinces tab: the gap is
+    there for the game's sake, but the river is still a river on the ground,
+    so a province must go on being split along it (user).
     """
     h, w = owner.shape
     river = owner >= 0
     if not river.any() or not max_branches:   # 0 = the user turned the limit off
-        return 0
+        return 0, []
 
     def degrees(mask):
         p = np.pad(mask, 1).view(np.uint8)
@@ -5779,7 +5916,7 @@ def _split_big_networks(out, owner, water=None, max_branches=RIVER_MAX_BRANCHES_
     sizes = np.bincount(lab.ravel(), minlength=n_net + 1)
     branches = np.bincount(lab[river & (deg >= 3)].ravel(), minlength=n_net + 1)
     if not ((branches[1:] > max_branches) | (sizes[1:] > max_px)).any():
-        return 0
+        return 0, []
 
     nid = {}
     for y, x in zip(*np.nonzero(river & (deg != 2))):
@@ -5820,7 +5957,7 @@ def _split_big_networks(out, owner, water=None, max_branches=RIVER_MAX_BRANCHES_
     for yx, i in nid.items():
         by_net.setdefault(int(lab[yx]), []).append(i)
 
-    cuts = 0
+    cuts, cut_px = 0, []
     for net, members in by_net.items():
         if branches[net] <= max_branches and sizes[net] <= max_px:
             continue
@@ -5853,10 +5990,66 @@ def _split_big_networks(out, owner, water=None, max_branches=RIVER_MAX_BRANCHES_
                 out[y, x] = RIVER_WATER if water is not None and water[y, x] else RIVER_LAND
                 owner[y, x] = -1
                 cuts += 1
+                cut_px.append((int(y), int(x)))
             else:
                 nb[par] += nb[u]
                 npx[par] += npx[u] + len(path)
-    return cuts
+    return cuts, cut_px
+
+
+def _main_stem_source(out, owner, painted, lab, comp, dis_img, pixels):
+    """Where a river network's green source belongs: the first pixel of its
+    **main stem**, plus the flow-in markers that have to go with it.
+
+    A piece a cut split off keeps no source, and which pixel deserves one
+    cannot be read off the picture: the water comes in at a pixel that looks
+    like any other. The drawn strokes know -- they run head -> mouth, and at
+    each confluence the branch with the most discharge is the one that
+    continues the river (`_selection_strokes`) -- so the piece's main river
+    is the stroke owning its biggest discharge, and its start is that
+    stroke's head. (Walking the picture by discharge instead cannot tell
+    upstream from downstream where a stroke's discharge is flat, which is
+    most of it: on the user's France map it walked *down* a 3,887 px piece
+    and cleared two flow-ins on the way.)
+
+    Where the cut took the stem above that head, the stem simply stops inside
+    the piece, and the biggest branch still feeding it *is* the river here:
+    the walk carries on into that branch (and so on), and the branch's red
+    flow-in marker is reported back to be painted as plain river -- it no
+    longer flows into anything, there is nothing left above it. A marker left
+    there would say a tributary flows into a river with no source, which is
+    what broke the cut-off half of the Seine on the user's France map (its
+    green had gone to a tributary's head 200 px away, that tributary's own
+    flow-in still in place).
+
+    Returns (y, x, [flow-in pixels to clear]).
+    """
+    h, w = out.shape
+    y, x = max(pixels, key=lambda q: dis_img[q])   # the piece's outlet: its biggest discharge
+    reds = []
+    walked = set()
+    while True:
+        k = int(owner[y, x])
+        path = painted.get(k)
+        j = None if path is None else next((i for i, q in enumerate(path) if tuple(q) == (y, x)), None)
+        if j is None or k in walked:                   # nothing to follow: the river starts here
+            return int(y), int(x), reds
+        walked.add(k)
+        while j > 0:                                   # up the stroke, as far as the piece goes
+            py, pxx = (int(v) for v in path[j - 1])
+            if owner[py, pxx] < 0 or lab[py, pxx] != comp:
+                break                                  # the cut took the rest of it
+            j -= 1
+            y, x = py, pxx
+        if j == 0:                                     # the stroke's own head
+            return int(y), int(x), reds
+        feed = max(((dis_img[y + a, x + b], y + a, x + b) for a, b in _D4
+                    if 0 <= y + a < h and 0 <= x + b < w and out[y + a, x + b] == RIVER_FLOW_IN
+                    and lab[y + a, x + b] == comp), default=None)
+        if feed is None:                               # nothing feeds the stem's first pixel
+            return int(y), int(x), reds
+        y, x = int(feed[1]), int(feed[2])              # into the biggest branch left, its marker gone
+        reds.append((y, x))
 
 
 def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis, water=None,
@@ -5872,8 +6065,9 @@ def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis, water=None,
         outside the frame);
       * then HOI4's rule -- exactly one source per contiguous river network
         (4-connected, red junctions included) -- is enforced: a network
-        without one (a piece split off by a gap) gets it on its upstream-most
-        end pixel; extra ones are removed (the biggest river's is kept).
+        without one (a piece split off by a gap) is re-sourced at the start
+        of its own main stem (`_main_stem_source`); extra ones are removed
+        (the biggest river's is kept).
     Returns report fields."""
     h, w = owner.shape
     if not painted:
@@ -5905,51 +6099,52 @@ def _paint_hoi4_rivers(out, owner, painted, parent_of, path_dis, water=None,
             out[path[0]] = RIVER_SOURCE
     # No network bigger than the game loads quickly (before the source rule,
     # which gives every piece that comes out of it its own source).
-    n_cut = _split_big_networks(out, owner, water, max_branches)
+    n_cut, cut_px = _split_big_networks(out, owner, water, max_branches)
     # Exactly one source per contiguous network.
     river = owner >= 0
     lab, n = ndimage.label(river, structure=_CONNECTIVITY_4)
     src = out == RIVER_SOURCE
     n_src = np.bincount(lab[src], minlength=n + 1)
-    added = removed = 0
+    added = removed = cleared = 0
     if (n_src[1:] != 1).any():
-        p = np.pad(river, 1).view(np.uint8)
-        deg = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) * river
         dis_img = np.zeros((h, w), dtype=np.float64)
         for k, path in painted.items():
             pr_, pc_ = np.array(path).T
             dis_img[pr_, pc_] = path_dis[k]
+
+        def width_of(d):                     # the width class a marker pixel would have had
+            return RIVER_WIDTHS[int(np.clip(int((np.log(max(float(d), 1e-3)) - np.log(lo)) / span * n_w),
+                                            0, n_w - 1))]
+
         for comp in np.flatnonzero(n_src[1:] != 1) + 1:
             cr, cc_ = np.nonzero(lab == comp)
             if n_src[comp] > 1:              # keep the one on the biggest river
                 srcs = [(dis_img[y, x], y, x) for y, x in zip(cr.tolist(), cc_.tolist()) if src[y, x]]
                 srcs.sort(reverse=True)
                 for _d, y, x in srcs[1:]:
-                    k = int(owner[y, x])
-                    cls = np.clip(int((np.log(max(dis_img[y, x], 1e-3)) - np.log(lo)) / span * n_w), 0, n_w - 1)
-                    out[y, x] = RIVER_WIDTHS[cls]
+                    out[y, x] = width_of(dis_img[y, x])
                     removed += 1
-            else:                            # none: the upstream-most end pixel
-                tips = [(dis_img[y, x], y, x) for y, x in zip(cr.tolist(), cc_.tolist())
-                        if deg[y, x] <= 1 and out[y, x] not in (RIVER_FLOW_IN, RIVER_FLOW_OUT)]
-                if not tips:
-                    tips = [(dis_img[y, x], y, x) for y, x in zip(cr.tolist(), cc_.tolist())
-                            if out[y, x] not in (RIVER_FLOW_IN, RIVER_FLOW_OUT)]
-                if tips:
-                    _d, y, x = min(tips)
-                    out[y, x] = RIVER_SOURCE
-                    added += 1
+            else:                            # none: the start of this piece's own main stem
+                y, x, reds = _main_stem_source(out, owner, painted, lab, int(comp), dis_img,
+                                               zip(cr.tolist(), cc_.tolist()))
+                for fy, fx in reds:          # a tributary of a river that is no longer there
+                    out[fy, fx] = width_of(dis_img[fy, fx])
+                    cleared += 1
+                out[y, x] = RIVER_SOURCE
+                added += 1
     bounds = [float(np.exp(np.log(lo) + span * i / n_w)) for i in range(n_w + 1)]
     return {"river_px": int(river.sum()), "sources": int((out == RIVER_SOURCE).sum()),
             "flow_ins": int((out == RIVER_FLOW_IN).sum()),
-            "sources_added": added, "sources_removed": removed, "networks": int(n),
-            "network_cuts": n_cut, "width_classes_cms": [round(v, 2) for v in bounds]}
+            "sources_added": added, "sources_removed": removed, "flow_ins_cleared": cleared,
+            "networks": int(n), "network_cuts": n_cut, "network_cut_px": cut_px,
+            "width_classes_cms": [round(v, 2) for v in bounds]}
 
 
 def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAULT,
                   min_length_px: int = RIVER_MIN_LENGTH_DEFAULT, auto_spacing_px=None,
                   through_lakes: bool = True, reach_sea: bool = True, drop_dead_ends: bool = True,
-                  fit_borders: bool = True, max_branches: int = RIVER_MAX_BRANCHES_DEFAULT):
+                  fit_borders: bool = True, max_branches: int = RIVER_MAX_BRANCHES_DEFAULT,
+                  heights=None):
     """The Rivers tab's map of a render: land white, sea *and lakes* black,
     rivers blue -- per continent (RIVER_CONTINENTS), the `top_percent` % of
     that continent's HydroRIVERS segments in view with the highest average
@@ -5963,8 +6158,15 @@ def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAU
         Nile isn't cut by Lake Nasser nor the Dnieper by its reservoirs.
       reach_sea: an ocean outlet (NEXT_DOWN = 0, not endorheic) whose end
         pixel doesn't touch the sea -- GADM's coastline lies further out
-        than HydroSHEDS' -- gets a straight side-connected line to the
-        nearest sea pixel, up to RIVER_MOUTH_MAX_GAP_PX away.
+        than HydroSHEDS' -- is continued to the sea, up to
+        RIVER_MOUTH_MAX_GAP_PX away, **following the ground**: downhill
+        along the lowest way there, round a ridge rather than over it
+        (_extend_strokes_to_sea, _elevation_route).
+      heights: the frame's raw topography for that routing. Left out, it is
+        read for the frame when a mouth needs it (render_heightmap); without
+        the NASA topography downloaded at all there is nothing to follow and
+        the route falls back to the one with the fewest pixels -- a straight
+        line -- which report["mouth_routing"] says.
       drop_dead_ends: rivers ending inland outside any lake (river_dead_ends)
         are left out before the percentages are computed.
       max_branches: the most branch pixels one river network (4-connected,
@@ -5977,7 +6179,10 @@ def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAU
         (_fit_borders_to_rivers): each keeps to one side of its border and
         the border follows it where the river rules kept it off.
     Returns (image, report); report["countries_image"] is the country map
-    with its borders fitted to the rivers (the input image when off)."""
+    with its borders fitted to the rivers (the input image when off), and
+    report["network_cut_px"] the pixels the branch cap deleted -- the
+    Provinces tab puts them back, so a province is still split along a river
+    where one of those gaps falls (provinces.render_provinces)."""
     if not isinstance(top_percent, dict):
         top_percent = {code: float(top_percent) for code, _n, _r in RIVER_CONTINENTS}
     top_percent = {code: float(top_percent.get(code, RIVER_TOP_PERCENT_BY_CONTINENT.get(code, RIVER_TOP_PERCENT_DEFAULT)))
@@ -6143,8 +6348,16 @@ def render_rivers(image: Image.Image, debug, top_percent=RIVER_TOP_PERCENT_DEFAU
     report.update({f"{k}_rivers": v_ for k, v_ in draw_stats.items()})
     report["rivers"] = int(len(painted))
     if reach_sea:
-        report["extended_mouths"], report["extended_px"] = _extend_strokes_to_sea(
-            owner, painted, [k for k in range(n_str) if is_mouth[k]], sea, lakes_px, allowed)
+        to_extend = [k for k in range(n_str) if is_mouth[k]]
+        # the heights only where a mouth may need them (a frame's worth of
+        # topography costs a few seconds, a cache hit costs nothing)
+        if heights is None and to_extend and elevation_available():
+            heights, zrep = elevation_m(debug)
+            report["mouth_elevation"] = {k: zrep.get(k) for k in ("source", "gmted_arcsec", "gmted_share")}
+        report["mouth_routing"] = "elevation" if heights is not None else "shortest"
+        (report["extended_mouths"], report["extended_px"],
+         report["mouths_too_far_round"]) = _extend_strokes_to_sea(
+            owner, painted, to_extend, sea, lakes_px, allowed, heights)
     if through_lakes and lakes_px.any():
         report["lake_rerouted"], report["lake_pulled_px"] = _pull_rivers_into_lakes(owner, painted, parent,
                                                                                    lakes_px, allowed)
@@ -6243,29 +6456,53 @@ def _unproject(projection_id: str, center: float, x, y):
     return lon, lat, inside
 
 
+def _view_sample(v, n: int = 32):
+    """(degrees per pixel at the view's finest, lon, lat over a coarse grid
+    of it): how fine the frame is -- from a sample of its pixels and their
+    neighbours one pixel right / down -- and which ground it covers, for
+    picking a source resolution (see render_heightmap, elevation_m)."""
+    h, w, scale = v["height"], v["width"], v["scale"]
+    cols_x = v["win_xmin"] + (np.arange(w) + 0.5) / scale
+    rows_y = v["win_ymin"] + (h - (np.arange(h) + 0.5)) / scale
+    gy, gx = np.meshgrid(rows_y[:: max(h // n, 1)], cols_x[:: max(w // n, 1)], indexing="ij")
+    lon0, lat0, ok0 = _unproject(v["projection"], v["center"], gx, gy)
+    lon1, _l, ok1 = _unproject(v["projection"], v["center"], gx + 1.0 / scale, gy)
+    _l, lat2, ok2 = _unproject(v["projection"], v["center"], gx, gy - 1.0 / scale)
+    ok = ok0 & ok1 & ok2
+    step = np.minimum(np.abs((lon1 - lon0 + 180.0) % 360.0 - 180.0), np.abs(lat2 - lat0))[ok]
+    return (float(step.min()) if len(step) else 1.0), lon0[ok0], lat0[ok0]
+
+
+def _view_lonlat_chunks(v, chunk_px: int = 2_000_000):
+    """The frame's pixel centres un-projected to lon / lat, a band of rows at
+    a time: (first row, last row + 1, lon, lat, inside the world outline)."""
+    h, w, scale = v["height"], v["width"], v["scale"]
+    cols_x = v["win_xmin"] + (np.arange(w) + 0.5) / scale
+    rows_y = v["win_ymin"] + (h - (np.arange(h) + 0.5)) / scale
+    rows_per = max(1, chunk_px // max(w, 1))
+    for r0 in range(0, h, rows_per):
+        r1 = min(h, r0 + rows_per)
+        yy, xx = np.meshgrid(rows_y[r0:r1], cols_x, indexing="ij")
+        lon, lat, inside = _unproject(v["projection"], v["center"], xx, yy)
+        yield r0, r1, lon, lat, inside
+
+
 def render_heightmap(debug, chunk_px: int = 2_000_000):
     """The topography (8-bit grey, as NASA's tiles: 0 = sea level or below,
     255 = highest peaks) reprojected onto the render's frame (debug["view"]):
     every output pixel centre is un-projected to lon/lat and the tiles are
     sampled bilinearly, decoded at the coarsest 1/1, 1/2, 1/4 or 1/8
     resolution still at least as fine as the view's finest pixel. Pixels
-    outside the projection's world outline are 0. Returns (image, report)."""
+    outside the projection's world outline are 0. Returns (image, report).
+
+    This is the 8-bit source, ~26.5 m per step: `elevation_m` prefers
+    GMTED's metres and falls back to this."""
     v = debug["view"]
-    h, w, scale = v["height"], v["width"], v["scale"]
+    h, w = v["height"], v["width"]
     if not topography_available():
         return Image.new("L", (w, h), 0), {"available": False}
     t0 = time.time()
-    cols_x = v["win_xmin"] + (np.arange(w) + 0.5) / scale
-    rows_y = v["win_ymin"] + (h - (np.arange(h) + 0.5)) / scale
-    # Finest pixel in degrees, from a coarse grid of pixels and their
-    # neighbours one pixel right / down.
-    gy, gx = np.meshgrid(rows_y[:: max(h // 32, 1)], cols_x[:: max(w // 32, 1)], indexing="ij")
-    lon0, lat0, ok0 = _unproject(v["projection"], v["center"], gx, gy)
-    lon1, _l, ok1 = _unproject(v["projection"], v["center"], gx + 1.0 / scale, gy)
-    _l, lat2, ok2 = _unproject(v["projection"], v["center"], gx, gy - 1.0 / scale)
-    ok = ok0 & ok1 & ok2
-    step = np.minimum(np.abs((lon1 - lon0 + 180.0) % 360.0 - 180.0), np.abs(lat2 - lat0))[ok]
-    deg_px = float(step.min()) if len(step) else 1.0
+    deg_px, _slon, _slat = _view_sample(v)
     src_deg = TOPO_TILE_DEG / TOPO_TILE_PX
     reduce = 1
     while reduce < 8 and src_deg * reduce * 2 <= deg_px:
@@ -6274,12 +6511,8 @@ def render_heightmap(debug, chunk_px: int = 2_000_000):
     d = TOPO_TILE_DEG / n  # degrees per source pixel
     n_cols, n_rows = 4 * n, 2 * n
     out = np.zeros((h, w), dtype=np.uint8)
-    rows_per = max(1, chunk_px // max(w, 1))
     used = set()
-    for r0 in range(0, h, rows_per):
-        r1 = min(h, r0 + rows_per)
-        yy, xx = np.meshgrid(rows_y[r0:r1], cols_x, indexing="ij")
-        lon, lat, inside = _unproject(v["projection"], v["center"], xx, yy)
+    for r0, r1, lon, lat, inside in _view_lonlat_chunks(v, chunk_px):
         u = (lon + 180.0) / d - 0.5  # source column (pixel centres at integers)
         q = (90.0 - lat) / d - 0.5
         j0 = np.floor(u).astype(np.int64)
@@ -6303,6 +6536,69 @@ def render_heightmap(debug, chunk_px: int = 2_000_000):
         "available": True, "reduce": reduce, "source_arcsec": round(d * 3600.0, 1),
         "view_deg_per_px": round(deg_px, 5),
         "tiles": sorted("ABCD"[t % 4] + str(t // 4 + 1) for t in used), "seconds": round(time.time() - t0, 2)}
+
+
+def elevation_available() -> bool:
+    """Whether any elevation source is on disk (see elevation_m)."""
+    import gmted
+    return gmted.available() or topography_available()
+
+
+def elevation_missing_message() -> str:
+    return ("No elevations are downloaded: get GMTED2010 land elevations (metres, the tiles your map "
+            "covers) or the NASA Topographic Heightmap from the Download tab.")
+
+
+def elevation_m(debug, chunk_px: int = 2_000_000):
+    """**The frame's land elevations in metres** -- the one source every step
+    that needs real heights reads: the sea level rise (`drown_land`), the
+    river mouths (`_elevation_route`), the HOI4 heightmap's levels
+    (`hoi4_heightmap`) and the Terrain tab's relief.
+
+    GMTED2010 (16-bit metres, 15 or 7.5 arcsec, `gmted.py`) wherever its
+    tiles are on disk, sampled on the finest grid the view's own tiles offer;
+    the NASA 8-bit topography x NASA_M_PER_UNIT (~26.5 m per step) for the
+    rest of the frame, so a view outside GMTED's coverage (Antarctica, below
+    56S) or with tiles not downloaded still works, just coarsely. Pixels no
+    source covers are 0 m and counted in the report.
+
+    Returns (float32 metres, report) -- (None, report) when neither source is
+    there."""
+    import gmted
+    v = debug["view"]
+    h, w = v["height"], v["width"]
+    t0 = time.time()
+    deg_px, slon, slat = _view_sample(v)
+    arcsec, want = gmted.grid_arcsec(slon, slat, deg_px) if gmted.available() else (None, [])
+    out = np.zeros((h, w), dtype=np.float32)
+    have = np.zeros((h, w), dtype=bool)
+    if arcsec is not None:
+        for r0, r1, lon, lat, inside in _view_lonlat_chunks(v, chunk_px):
+            z, ok = gmted.heights_m(lon, lat, arcsec=arcsec)
+            if z is None:
+                break
+            ok &= inside
+            out[r0:r1] = np.where(ok, z, 0.0)
+            have[r0:r1] = ok
+    report = {"available": True, "source": "gmted" if have.all() else "gmted+nasa" if have.any() else "nasa",
+              "gmted_arcsec": arcsec, "gmted_share": round(float(have.mean()), 4),
+              "gmted_tiles": [gmted.tile_name(*k) for k in want],
+              "view_deg_per_px": round(deg_px, 5), "view_arcsec_per_px": round(deg_px * 3600.0, 2)}
+    if gmted.problems():
+        report["gmted_unreadable"] = sorted(f"{gmted.tile_name(*k)}: {why}"
+                                            for k, why in gmted.problems().items())
+    if not have.all():
+        if topography_available():
+            grey, grep = render_heightmap(debug, chunk_px)
+            out = np.where(have, out, np.asarray(grey, dtype=np.float32) * NASA_M_PER_UNIT)
+            report["nasa_m_per_step"] = NASA_M_PER_UNIT
+            report["nasa_reduce"] = grep.get("reduce")
+        elif not have.any():
+            return None, {"available": False, "source": None}
+        else:
+            report["uncovered_px"] = int((~have).sum())   # no second source: those pixels stay 0 m
+    report["seconds"] = round(time.time() - t0, 2)
+    return out, report
 
 
 def heightmap_overlay(height: Image.Image, countries: Image.Image) -> Image.Image:
@@ -6352,8 +6648,55 @@ RELIEF_REF_M = 1000.0     # amplitude that is left as is (Alps / Himalaya / Zagr
 RELIEF_FLAT_M = 60.0      # below this amplitude (plains) nothing is exaggerated ...
 RELIEF_FULL_M = 150.0     # ... from this one on the full gain applies (hills and mountains)
 RELIEF_EXPONENT = 0.6     # gain = (REF / amplitude) ** exponent, capped by the strength
+# The exaggeration may not invent ground outside what is really there: not
+# above the top of the HOI4 curve (255 NASA steps, where hoi4_heightmap
+# saturates) and not below sea level, which is what the old 0-255 grey clip
+# did and what the Terrain tab's relief tiers were calibrated against. Real
+# ground outside that range keeps its height, now that the elevations are
+# metres: Everest is 8,849 m, the Dead Sea shore -430 m, and GMTED reads the
+# Dutch polders at -14 m.
+HEIGHT_CEIL_M = 255.0 * 26.5      # 255 x NASA_M_PER_UNIT, defined just below
 RELIEF_STRENGTH_DEFAULT = 4.0  # max gain; 1 = off (user's setting, 2026-09-27; was 2)
 RELIEF_STRENGTH_MAX = 4.0
+
+# The Heightmap tab's five relief settings, sent by every tab that builds on
+# the heights (Heightmap, Terrain, and the provinces / export requests that
+# carry them along). **The cap alone decides nothing**: the gain is
+# (ref / amplitude) ** exponent faded out between flat and full, whose own
+# maximum over all amplitudes is ~3.2 with the defaults, so the cap only
+# binds once the shape is pushed (ref 3000 + exponent 1.0 asks for 20 at an
+# amplitude of 150 m). Measured, and why each knob exists, in NOTES.md.
+RELIEF_DEFAULTS = {
+    "relief": RELIEF_STRENGTH_DEFAULT,   # cap on the gain; 1 = off
+    "relief_ref_m": RELIEF_REF_M,        # the amplitude already big enough to leave alone
+    "relief_exponent": RELIEF_EXPONENT,  # how fast the gain falls off as a range grows
+    "relief_flat_m": RELIEF_FLAT_M,      # below this amplitude nothing is exaggerated ...
+    "relief_full_m": RELIEF_FULL_M,      # ... from this one on the full gain applies
+}
+RELIEF_LIMITS = {"relief": (1.0, RELIEF_STRENGTH_MAX), "relief_ref_m": (50.0, 20000.0),
+                 "relief_exponent": (0.0, 3.0), "relief_flat_m": (0.0, 5000.0),
+                 "relief_full_m": (1.0, 5000.0)}
+
+
+def normalize_relief(values=None):
+    """The relief settings of a request (strings fine, missing ones take
+    their default), checked against RELIEF_LIMITS. `flat` must stay under
+    `full`, or the fade between them has no width."""
+    out = dict(RELIEF_DEFAULTS)
+    for key, default in RELIEF_DEFAULTS.items():
+        raw = (values or {}).get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            out[key] = float(raw)
+        except (TypeError, ValueError):
+            raise RenderError(f"{key} must be a number")
+        lo, hi = RELIEF_LIMITS[key]
+        if not lo <= out[key] <= hi:
+            raise RenderError(f"{key} must be between {lo:g} and {hi:g}")
+    if out["relief_flat_m"] >= out["relief_full_m"]:
+        raise RenderError("relief_flat_m must be under relief_full_m (the fade needs room between them)")
+    return out
 
 
 def _km_per_px(debug) -> float:
@@ -6367,17 +6710,20 @@ def _km_per_px(debug) -> float:
 
 
 def exaggerate_relief(height: np.ndarray, land: np.ndarray, km_per_px: float,
-                      strength: float = RELIEF_STRENGTH_DEFAULT):
+                      strength: float = RELIEF_STRENGTH_DEFAULT, ref_m: float = RELIEF_REF_M,
+                      exponent: float = RELIEF_EXPONENT, flat_m: float = RELIEF_FLAT_M,
+                      full_m: float = RELIEF_FULL_M):
     """Exaggerate the relief of lower mountain ranges relative to their
     surroundings, so the Scandes, Sudetes, Appalachians, Scottish Highlands
     or Urals don't look flat next to the Himalaya or the Iranian ranges.
-    On land (NASA grey, float): base = land-only Gaussian average at
+    On land (metres, float): base = land-only Gaussian average at
     RELIEF_BASE_KM; amplitude A = RMS of (height - base) at RELIEF_AMP_KM;
-    height' = base + (height - base) * gain, with gain = (RELIEF_REF_M / A)
-    ** RELIEF_EXPONENT capped to [1, strength] -- ranges already rising
-    ~RELIEF_REF_M above their base keep their shape -- and faded out below
-    RELIEF_FULL_M down to nothing at RELIEF_FLAT_M, so plains stay flat
-    (their noise isn't amplified). Computed on a reduced grid (~4 cells per
+    height' = base + (height - base) * gain, with gain = (ref_m / A) **
+    exponent capped to [1, strength] -- ranges already rising ~ref_m above
+    their base keep their shape -- and faded out below full_m down to
+    nothing at flat_m, so plains stay flat (their noise isn't amplified).
+    The four shape settings default to the RELIEF_* constants and come from
+    the Heightmap tab (RELIEF_DEFAULTS, normalize_relief). Computed on a reduced grid (~4 cells per
     sigma), then interpolated back. Returns (height', gain)."""
     h = height.astype(np.float64)
     if strength <= 1.0 or not land.any():
@@ -6395,16 +6741,16 @@ def exaggerate_relief(height: np.ndarray, land: np.ndarray, km_per_px: float,
     base_s = ndimage.gaussian_filter(hs, sb, mode="nearest") / np.maximum(wl, 1e-9)
     dev2 = np.maximum(h2s - 2.0 * base_s * hs + base_s ** 2 * ls, 0.0)  # sum over the cell of (h - base)^2
     amp_s = np.sqrt(ndimage.gaussian_filter(dev2, sa, mode="nearest")
-                    / np.maximum(ndimage.gaussian_filter(ls, sa, mode="nearest"), 1e-9)) * NASA_M_PER_UNIT
+                    / np.maximum(ndimage.gaussian_filter(ls, sa, mode="nearest"), 1e-9))
     zoom = (hp.shape[0] / base_s.shape[0], hp.shape[1] / base_s.shape[1])
     base = ndimage.zoom(base_s, zoom, order=1, mode="nearest", grid_mode=True)[:H, :W]
     amp = ndimage.zoom(amp_s, zoom, order=1, mode="nearest", grid_mode=True)[:H, :W]
-    gain = np.clip((RELIEF_REF_M / np.maximum(amp, 1e-6)) ** RELIEF_EXPONENT, 1.0, strength)
-    t = np.clip((amp - RELIEF_FLAT_M) / (RELIEF_FULL_M - RELIEF_FLAT_M), 0.0, 1.0)
+    gain = np.clip((ref_m / np.maximum(amp, 1e-6)) ** exponent, 1.0, strength)
+    t = np.clip((amp - flat_m) / max(full_m - flat_m, 1e-6), 0.0, 1.0)
     gain = 1.0 + (gain - 1.0) * t * t * (3 - 2 * t)
     gain = np.where(land, gain, 1.0)
     out = np.where(land, base + (h - base) * gain, h)
-    return np.clip(out, 0.0, 255.0), gain
+    return np.clip(out, np.minimum(h, 0.0), np.maximum(h, HEIGHT_CEIL_M)), gain
 
 
 def country_map_water(countries: Image.Image, debug) -> np.ndarray:
@@ -6422,25 +6768,32 @@ def country_map_water(countries: Image.Image, debug) -> np.ndarray:
     return water
 
 
-def exaggerated_height(height: Image.Image, countries: Image.Image, debug,
-                       relief_strength: float = RELIEF_STRENGTH_DEFAULT):
-    """The reprojected NASA heightmap with lower ranges exaggerated
-    (exaggerate_relief; NASA grey units, float), as the Heightmap tab builds
-    its HOI4 heightmap from it -- also the Terrain tab's relief source.
-    Returns (height, gain, km per px)."""
+def exaggerated_height(height, countries: Image.Image, debug,
+                       relief_strength: float = RELIEF_STRENGTH_DEFAULT, relief=None):
+    """The frame's elevations (`elevation_m`, **metres**) with lower ranges
+    exaggerated (exaggerate_relief), as the Heightmap tab builds its HOI4
+    heightmap from it -- also the Terrain tab's relief source. An 8-bit
+    image is taken as NASA grey and converted. `relief` = the tab's shape
+    settings (RELIEF_DEFAULTS / normalize_relief), `relief_strength` the cap
+    among them. Returns (metres, gain, km per px)."""
     water = country_map_water(countries, debug)
     kpp = _km_per_px(debug)
-    grey, gain = exaggerate_relief(np.asarray(height.convert("L")), ~water, kpp, relief_strength)
-    return grey, gain, kpp
+    if isinstance(height, Image.Image):
+        height = np.asarray(height.convert("L"), dtype=np.float32) * NASA_M_PER_UNIT
+    r = dict(RELIEF_DEFAULTS, **(relief or {}))
+    metres, gain = exaggerate_relief(np.asarray(height, dtype=np.float32), ~water, kpp, relief_strength,
+                                     r["relief_ref_m"], r["relief_exponent"],
+                                     r["relief_flat_m"], r["relief_full_m"])
+    return metres, gain, kpp
 
 
-def hoi4_heightmap(height: Image.Image, countries: Image.Image, debug,
-                   relief_strength: float = RELIEF_STRENGTH_DEFAULT, report=None):
-    """The reprojected NASA heightmap (render_heightmap) turned into HOI4's
+def hoi4_heightmap(height, countries: Image.Image, debug,
+                   relief_strength: float = RELIEF_STRENGTH_DEFAULT, report=None, relief=None):
+    """The frame's elevations (`elevation_m`, metres) turned into HOI4's
     heightmap.bmp levels. Land and water come from the country map and its
-    Land/Sea steps, not from NASA -- whose coastline doesn't match GADM's
-    (land at 0 along low coasts, sea above 0 near cliffs): water (sea,
-    lakes) is HOI4_WATER_LEVEL; land (incl. hidden countries) is NASA mapped
+    Land/Sea steps, not from the elevations -- whose coastline doesn't match
+    GADM's (land at 0 along low coasts, sea above 0 near cliffs): water (sea,
+    lakes) is HOI4_WATER_LEVEL; land (incl. hidden countries) is the height
     through HOI4_HEIGHT_KNOTS, at least HOI4_LAND_MIN, ramped down to
     HOI4_COAST_LEVEL over the pixels next to the water (HOI4_COAST_RAMP).
     The river map isn't involved (its rivers may cross lakes). Lower
@@ -6449,9 +6802,11 @@ def hoi4_heightmap(height: Image.Image, countries: Image.Image, debug,
     (dict) gets the relief stats."""
     water = country_map_water(countries, debug)
     kx, ky = zip(*HOI4_HEIGHT_KNOTS)
-    grey, gain, kpp = exaggerated_height(height, countries, debug, relief_strength)
+    kx = np.asarray(kx, dtype=np.float64) * NASA_M_PER_UNIT   # the knots were measured in NASA steps
+    grey, gain, kpp = exaggerated_height(height, countries, debug, relief_strength, relief)
     if report is not None:
         g = gain[~water] if (~water).any() else np.ones(1)
+        report.update({k: float(v) for k, v in dict(RELIEF_DEFAULTS, **(relief or {})).items()})
         report.update(relief_strength=float(relief_strength), km_per_px=round(kpp, 3),
                       relief_gain_p50=round(float(np.median(g)), 2), relief_gain_max=round(float(g.max()), 2),
                       relief_boosted_share=round(float((g > 1.05).mean()), 3))

@@ -426,7 +426,9 @@ def _trees_map(masks, w, h, blend_px=0, target_frac=None):
 def render_terrain(countries: Image.Image, debug, height: Image.Image, settings=None, city_points=None):
     """(terrain P image with the game's palette, report, raw land cover P
     image -- Copernicus codes as indices, Copernicus colours). `height` is
-    the raw NASA heightmap on the same frame (core.render_heightmap).
+    the frame's elevations in metres, lower ranges exaggerated
+    (core.exaggerated_height over core.elevation_m); an 8-bit image is taken
+    as NASA grey (core.NASA_M_PER_UNIT per step).
     city_points: the City tab's cities [(x, y, class)] (None = not
     available) for the urban discs."""
     s = normalize_settings(settings)
@@ -539,10 +541,12 @@ def render_terrain(countries: Image.Image, debug, height: Image.Image, settings=
         report["transition_px"] = int(trans.sum())
 
     # 4. Relief.
-    # Height in NASA grey units -> metres: the Heightmap tab's exaggerated
-    # heights (core.exaggerated_height, float array), or a plain image.
-    h_units = np.asarray(height.convert("L") if isinstance(height, Image.Image) else height, dtype=np.float32)
-    elev = h_units * core.NASA_M_PER_UNIT
+    # The Heightmap tab's exaggerated heights, in metres (an 8-bit image
+    # instead: NASA grey, converted).
+    if isinstance(height, Image.Image):
+        elev = np.asarray(height.convert("L"), dtype=np.float32) * core.NASA_M_PER_UNIT
+    else:
+        elev = np.asarray(height, dtype=np.float32)
     relief = _relief(elev, land, lat[:, w // 2], view, s)
     rcls = np.zeros((h, w), dtype=np.uint8)   # 0 flat, 1 hills, 2 low mountains, 3 mountains
     rcls[relief >= s["hill_m"]] = 1

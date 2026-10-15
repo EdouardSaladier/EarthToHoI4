@@ -416,6 +416,17 @@
     color: var(--muted);
   }
   .download-all-btn { margin-top: 0; width: auto; padding: 10px 20px; }
+  /* the long version of every setting: MANUAL.md, served at /manual */
+  .tab-manual {
+    margin-left: auto;
+    align-self: center;
+    padding: 0 4px 0 16px;
+    color: var(--muted);
+    font-size: 13px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .tab-manual:hover { color: var(--accent); }
   .download-card {
     display: flex;
     align-items: center;
@@ -466,8 +477,7 @@
     white-space: nowrap;
   }
   .download-btn:hover { background: var(--accent-hover); }
-  .download-card.tiled { flex-direction: column; align-items: stretch; }
-  .download-card.tiled .top-row {
+  .dl-body.column .top-row {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -495,6 +505,32 @@
   .tile-btn:hover { border-color: var(--accent); background: #161a24; }
   .tile-btn .tile-label { font-size: 13px; font-weight: 600; }
   .tile-btn .tile-size { font-size: 10.5px; color: var(--muted); }
+  /* alternatives in one card: a sub-tab each (only one of them is needed) */
+  .download-card { flex-direction: column; align-items: stretch; }
+  .dl-body { display: flex; align-items: center; gap: 20px; }
+  .dl-body.column { flex-direction: column; align-items: stretch; }
+  .download-card.group { gap: 0; }
+  .dl-group-head p { margin: 0 0 12px; }
+  .dl-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  .dl-tab {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 7px 14px;
+    background: #10131a;
+    border: 1px solid var(--border);
+    border-radius: 6px 6px 0 0;
+    border-bottom: 2px solid var(--border);
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .dl-tab:hover { color: var(--text); border-color: var(--accent); }
+  .dl-tab.active { color: var(--text); background: var(--panel); border-bottom-color: var(--accent); }
+  .dl-tab .dl-tab-name { font-weight: 600; }
+  .dl-tab .dl-tab-note, .dl-tab .dl-tab-count { font-size: 11.5px; color: var(--muted); }
+  .dl-tab .dl-done { font-size: 11.5px; }
 
   .dl-action {
     padding: 5px 12px;
@@ -567,6 +603,8 @@
   <button class="tab-btn" data-tab="provinces">Provinces</button>
   <button class="tab-btn" data-tab="strategic">Strategic regions</button>
   <button class="tab-btn" data-tab="hoi4mod">HOI4 mod</button>
+  <a class="tab-manual" id="tabManual" href="/manual" target="_blank" rel="noopener"
+     title="Every setting of this tab explained in full">Manual &#8599;</a>
 </div>
 
 <!-- ===================== TAB 0: DOWNLOAD ===================== -->
@@ -576,7 +614,7 @@
       <div class="download-summary" id="downloadSummary">Loading...</div>
       <button class="primary download-all-btn" id="downloadAllBtn">Download All</button>
     </div>
-    <div class="hint" style="margin-bottom:18px">Files are saved into <code>map_tool/data/&lt;resource&gt;/</code> on this machine.</div>
+    <div class="hint" style="margin-bottom:18px">Downloaded by the tool itself, into <code>data/&lt;resource&gt;/</code> on this machine.</div>
     <div id="downloadList">
       <div class="placeholder">Loading...</div>
     </div>
@@ -584,7 +622,7 @@
       <div class="download-summary" id="cacheSummary">Results cache: ...</div>
       <button class="small-btn" id="cacheClearBtn">Clear results cache</button>
     </div>
-    <div class="hint">Every tab's results (country map, rivers, states, terrain, provinces, strategic regions...) are kept in <code>map_tool/cache/results/</code>, so reopening the tool or coming back to a view doesn't compute them again. A result is reused only while nothing that went into it changed (settings, the tool's code, the downloaded data); the oldest are dropped beyond the size limit. Clearing is never needed for correctness &mdash; only to free disk space.</div>
+    <div class="hint">Every tab's results are kept in <code>cache/results/</code>, so coming back to a view doesn't compute it again. Clearing only frees disk space.</div>
   </div>
 </div>
 
@@ -599,7 +637,7 @@
       </div>
       <label for="lsLakeMin">Minimum lake size (px)</label>
       <input type="number" id="lsLakeMin" min="1" step="1">
-      <div class="hint">Lakes and reservoirs covering at least this many pixels become water before every other step below (islands in a lake count as islands), in their own colour on the map. Strait fixing never joins a lake to the sea.</div>
+      <div class="hint">Lakes at least this big become water before every other step, in their own colour.</div>
       <div class="error" id="lsLakesMissing" style="display:none">HydroLAKES isn't downloaded: get it from the Download tab (HydroSHEDS &rarr; Lakes).</div>
 
       <label>Island separation</label>
@@ -607,7 +645,7 @@
         <input type="checkbox" id="lsSep">
         <label for="lsSep" class="inline-label">Force water between islands and the land next to them</label>
       </div>
-      <div class="hint">Wherever two land masses that are separate in the data (e.g. Funen and Jutland across the 573&nbsp;m Little Belt) touch in the image, a water gap is cut on the larger one's side &mdash; land borders between countries are left alone.</div>
+      <div class="hint">Where two land masses that are separate in the data touch in the image, a water gap is cut on the larger one's side.</div>
 
       <label for="lsGap">Island gap (px)</label>
       <input type="number" id="lsGap" min="1" max="8" step="1">
@@ -629,7 +667,7 @@
         <input type="checkbox" id="lsGrow">
         <label for="lsGrow" class="inline-label">Enlarge small, remote islands</label>
       </div>
-      <div class="hint">Islands from the minimum size (inclusive) up to the maximum size (exclusive) that lie far enough from every continental mass are widened into the sea, keeping at least the island gap / minimum strait width from any other land.</div>
+      <div class="hint">Islands between these sizes that lie far from every continent are widened into the sea.</div>
       <div class="ls-form" style="grid-template-columns:1fr 1fr">
         <div><label for="lsGrowMin">Min size (px)</label><input type="number" id="lsGrowMin" min="1" step="1"></div>
         <div><label for="lsGrowMax">Max size (px)</label><input type="number" id="lsGrowMax" min="2" step="1"></div>
@@ -646,7 +684,7 @@
       </div>
       <label for="lsMicroPx">Microstate size (px)</label>
       <input type="number" id="lsMicroPx" min="1" step="1">
-      <div class="hint">A country whose whole area would be smaller than this gets a compact blob of this size around its centre (taken from the land around it first, then sea), and is kept by the small-area sieve.</div>
+      <div class="hint">A country smaller than this gets a compact blob of that size around its centre, and the sieve keeps it.</div>
 
       <label>Isolated sea pixels</label>
       <div class="radio-row">
@@ -655,14 +693,14 @@
       </div>
       <label for="lsSpeckBelow">Fill sea areas smaller than (px)</label>
       <input type="number" id="lsSpeckBelow" min="1" step="1">
-      <div class="hint">Sea areas not side-connected to other water and below this size become land, in the most common colour around them. Areas touching the image border are kept.</div>
+      <div class="hint">Isolated sea areas below this size become land. Areas touching the image border are kept.</div>
 
       <label>Diagonal connections</label>
       <div class="radio-row">
         <input type="checkbox" id="lsDiag">
         <label for="lsDiag" class="inline-label">Connect pixels that touch their land only diagonally</label>
       </div>
-      <div class="hint">Where a country's pixels touch only corner to corner, one side pixel between them is filled in that country's colour &mdash; a sea pixel when that splits no water and narrows no strait, else (on land borders) a neighbour's pixel it can spare.</div>
+      <div class="hint">Where a country's pixels touch only corner to corner, one pixel between them is filled in.</div>
 
       <label>Small colour areas</label>
       <div class="radio-row">
@@ -671,18 +709,18 @@
       </div>
       <label for="lsMinRegion">Minimum colour area (px)</label>
       <input type="number" id="lsMinRegion" min="1" step="1">
-      <div class="hint">Every connected area of one colour below this size (rogue border specks, tiny exclaves like Ll&iacute;via) joins its most common land neighbour, or the sea if it only touches sea. Areas touching the image border and microstates are kept. Runs last.</div>
+      <div class="hint">Every one-colour area below this size joins its most common land neighbour. Runs last.</div>
 
       <label>Strait fixing</label>
       <div class="radio-row">
         <input type="checkbox" id="lsFix">
         <label for="lsFix" class="inline-label">Reconnect straits narrower than a pixel</label>
       </div>
-      <div class="hint">Water bodies that are connected in the real (vector) coastline but got split by rasterization &mdash; e.g. the Bosphorus in a Europe-wide view &mdash; are re-joined by carving the most water-rich, shortest channel between them. Applies to every render (Countries and Rivers tabs, CLI).</div>
+      <div class="hint">Water split in two by rasterization &mdash; the Bosphorus in a Europe-wide view &mdash; is re-joined by carving a channel. Applies to every render.</div>
 
       <label for="lsWidth">Minimum strait width (px)</label>
       <input type="number" id="lsWidth" min="1" max="8" step="1">
-      <div class="hint">Every water passage linking two water areas is widened to at least this many pixels (both axes), so connections survive 4-connectivity. Dead-end inlets are left alone.</div>
+      <div class="hint">Every passage between two water areas is widened to at least this, on both axes.</div>
 
       <label for="lsBody">Minimum water body (px)</label>
       <input type="number" id="lsBody" min="1" step="1">
@@ -706,7 +744,7 @@
 
       <label>Blocked points</label>
       <div id="lsBlocked"></div>
-      <div class="hint">No channel is carved within a few pixels of a blocked point &mdash; use it to reject a false strait (click "Block" in the detected-channels list, or type <code>lon, lat</code>).</div>
+      <div class="hint">No channel is carved near a blocked point &mdash; use it to reject a false strait.</div>
       <div class="ls-form">
         <input type="text" id="blLonLat" placeholder="lon, lat">
         <input type="text" id="blLabel" placeholder="label (optional)">
@@ -756,23 +794,14 @@
       <div id="subdivResults"></div>
       <div class="chips" id="includedChips"></div>
       <div id="subdivSection"><div class="hint">Select a country to list its subdivisions.</div></div>
-      <div class="hint">Untick a selected country's states / provinces to leave them out: the view is framed on the ticked ones only, and parts of the country lying entirely in unticked ones (islands, exclaves: Hawaii, Corsica) are left out of the map (sea, on every tab). Overrides "Ignore overseas territories" for that country &mdash; e.g. the USA with Alaska but without Hawaii. Subdivisions joined to the rest by land can be left out of the framing, not of the drawing (GADM draws the country as one shape). The search also filters these lists, and lists matching subdivisions of other countries: <b>Add</b> one to frame it with your selection (e.g. Finland + Karelia) &mdash; its country is drawn as any neighbour.</div>
+      <div class="hint">Untick subdivisions to leave them out: the frame follows the ticked ones, and land lying wholly inside unticked ones becomes sea. The search also lists other countries' subdivisions, to frame one with your selection.</div>
 
       <label>Subdivisions (GADM level 2)</label>
       <input type="text" id="subdiv2Search" placeholder="Search counties / districts (any country)...">
       <div id="subdiv2Results"></div>
       <div class="chips" id="included2Chips"></div>
       <div id="subdiv2Section"><div class="hint">Select a country to list its subdivisions.</div></div>
-      <div class="hint">The same thing one level finer &mdash; counties, districts, council areas &mdash; for the
-        parts a level-1 region does not isolate: untick <b>Shetland Islands</b> (Scotland) or <b>Isles of
-        Scilly</b> (England) to drop them from a map of the British Isles. The two levels work together: an
-        unticked level-1 region takes all of its level-2 units with it, and the finer list is only read when you
-        use it. Same rule as above &mdash; only land that GADM draws as its own shape (islands, exclaves) can be
-        left out of the <i>drawing</i>; anything joined to the rest by land can only be left out of the framing.
-        <b>The Channel Islands are not British subdivisions</b>: Jersey and Guernsey are GADM countries of their
-        own with no level 2 at all. While "Autonomous territories" below is ticked they are drawn as part of the
-        UK, and the <i>level-1</i> list above then carries a block for each of them &mdash; untick all of a
-        block's parishes and that island goes.</div>
+      <div class="hint">The same one level finer, for what level 1 doesn't isolate (Shetland, Scilly). An unticked level-1 region takes its level-2 units with it.</div>
 
       <label for="projection">Projection</label>
       <select id="projection"></select>
@@ -784,7 +813,7 @@
       <select id="outputSize">
         <option value="auto">Auto (best fit)</option>
       </select>
-      <div class="hint">Auto picks the resolution whose aspect ratio best matches the selection. A manual size keeps the whole selection visible and adds extra surrounding area on the looser axis.</div>
+      <div class="hint">Auto picks the resolution closest to the selection's shape; a manual size keeps the whole selection visible.</div>
 
       <label>Crop borders</label>
       <div class="radio-row">
@@ -802,17 +831,7 @@
         <input type="number" id="cropBottom" value="0" min="0" step="1">
       </div>
       <div class="hint" id="cropNote" style="display:none"></div>
-      <div class="hint">Cuts bands of pixels off the chosen borders, on top of whatever the size above gives
-        &mdash; one border or several, 0 to leave one alone. <b>Any whole number of pixels</b>: a map's sides
-        have to stay in whole 256&nbsp;px steps, so what an axis loses is rounded up to the next step and
-        <b>the opposite side makes up the difference</b> &mdash; ask for 156&nbsp;px off the top and 100&nbsp;px
-        come off the bottom with it. The side you asked for always loses exactly what you asked; the box above
-        shows what that ends up taking. The crop is the <em>last</em> thing the render does, after the Land/Sea
-        steps and after the framing, so it can only remove map: zoom and position never change, and every other
-        tab &mdash; rivers, states, terrain, provinces &mdash; sees the cropped map. The HOI4 edge bands are
-        re-laid on the new borders, so no land is left touching them. It works on a world map too, where
-        cropping left or right cuts real longitude away &mdash; the map then covers less than the full
-        360&deg;, so keep the seam in mind.</div>
+      <div class="hint">Cuts bands of pixels off the chosen borders, 0 to leave one alone. A map's sides stay in whole 256&nbsp;px steps, so the opposite side makes up the difference &mdash; the box shows what that takes. Taken last, so nothing else moves.</div>
       <!-- Double size: hidden (the server still takes big=1, and the CLI
            --double-size). A 2x map needs a hoi4.exe patched with the map size
            unlocker, and it does not allow more provinces: the game's province
@@ -832,7 +851,7 @@
         <input type="checkbox" id="worldAntarctica" disabled>
         <label for="worldAntarctica" class="inline-label">Include Antarctica</label>
       </div>
-      <div class="hint">Shows every country (hidden ones excepted) edge to edge, with no margin; the country selection is then optional. With "Centre on" left on Auto, the map's edge runs through the Bering Strait. One column of water is always kept on each side, whatever the edge bands below are set to: the game joins the two borders (the map wraps), so an island painted against one of them would end up next to whatever sits on the other.</div>
+      <div class="hint">Every country edge to edge, with no margin; the selection is then optional. A column of water is always kept on each side, because the map wraps.</div>
 
       <label>Map edges</label>
       <div class="radio-row">
@@ -841,7 +860,7 @@
         <input type="number" id="edgeBandPx" value="4" min="2" max="10" step="1" style="width:4.5em">
         <span>px wide</span>
       </div>
-      <div class="hint">Left edge: a band of sea, a band of unowned land (dark grey, impassable in the game: no movement across the map's wrap), a band of sea. Right edge: a band of sea. Each band 2-10 px wide. Nothing along the top and bottom. Painted over whatever the view shows there, so no land touches the left or right edge, and rivers leaving the map end at the sea. The unowned strip belongs to no country or state, gets provinces of its own and never carries rivers.</div>
+      <div class="hint">Left: sea, a band of unowned impassable land, sea. Right: sea. 2&ndash;10&nbsp;px each, nothing top or bottom. <b>Always export with them on.</b></div>
 
       <label>Sea level</label>
       <div class="radio-row">
@@ -850,13 +869,7 @@
         <input type="number" id="seaLevel" value="50" min="1" max="8000" step="1" style="width:5.5em">
         <span>m</span>
       </div>
-      <div class="hint">Every piece of land at or below that height becomes sea <em>before</em> the Land/Sea
-        steps, so lakes, island separation, strait fixing and the sieve clean up the new coastline. The people
-        who lived there are lost (each state keeps the share of its population still above water) and no city
-        &mdash; so no victory point &mdash; is left in the water; the drowned ground keeps its depth for the sea
-        colours and the naval terrain. Heights come from the NASA topography (Download tab), whose grey steps
-        about 26&nbsp;m: the rise lands on the nearest step, so anything under ~13&nbsp;m goes at the first one.
-        The Land/Sea tab's preview shows the drowned land in its own colour.</div>
+      <div class="hint">Land at or below this height becomes sea before the Land/Sea steps. Its people and cities are lost. Real metres with GMTED2010; ~26.5&nbsp;m steps on the NASA heightmap.</div>
       <div class="error" id="seaTopoMissing" style="display:none">The NASA topography isn't downloaded: get it
         from the Download tab (NASA Topographic Heightmap).</div>
 
@@ -869,18 +882,18 @@
         <label for="eezOpacity" style="margin:0">Opacity (%)</label>
         <input type="number" id="eezOpacity" value="35" min="1" max="100" step="5">
       </div>
-      <div class="hint">Marine Regions' World EEZ v12 (Download tab): 200&nbsp;NM zones with internal and archipelagic waters, tinted flat in the country's colour (a disputed or joint zone in its first-listed party's). Follows the map's countries (hidden ones get none, merged territories their parent's colour; fragments under the Land/Sea minimum region size are merged away). Where the EEZ coastline and GADM's differ, the uncovered sea near land (up to 25&nbsp;km) takes the neighbouring zone, enclosed bays no zone reaches (Garabogazk&ouml;l) take the zone beside them, and the sea within 10&nbsp;km of a coast belongs to that coast's country (zone borders meet the land borders). Microstates' tiny zones (under 1,000&nbsp;km&sup2;: Monaco, Singapore, Slovenia, Neum, Aqaba) are erased and shared among their neighbours. No exclaves: every piece of a zone touches its country's land on the map (or the map edge); stray slivers join the zone beside them, and the zones of islands the map doesn't show (erased at world scale: Kiribati, Micronesia, Tonga, ...) are left as plain sea. Only shown on this map &mdash; the other tabs still see plain sea.</div>
+      <div class="hint">Marine Regions' World EEZ v12, tinted flat in each country's colour. On this map only &mdash; the other tabs still see plain sea.</div>
 
       <label for="centerOn">Centre the map on</label>
       <select id="centerOn"></select>
-      <div class="hint">Auto places the map's edge where it cuts through the least land. Picking a country puts it in the middle (and the edge on the opposite side of the globe).</div>
+      <div class="hint">Auto puts the map's edge where it cuts the least land; a country puts that country in the middle.</div>
 
       <label>Framing</label>
       <div class="radio-row">
         <input type="checkbox" id="ignoreOverseas" checked>
         <label for="ignoreOverseas" style="margin:0;text-transform:none;font-size:13.5px;color:var(--text)">Ignore overseas territories</label>
       </div>
-      <div class="hint">Frames the view on each selected country's mainland only (from GADM level-2 subdivisions), e.g. Portugal without the Azores and Madeira. Overseas parts are still drawn if they fall inside the view.</div>
+      <div class="hint">Frames on each country's mainland only (Portugal without the Azores). Overseas land inside the view is still drawn.</div>
 
       <label>Autonomous territories</label>
       <div class="radio-row">
@@ -904,9 +917,7 @@
       <div class="error" id="presetError" style="display:none"></div>
 
       <button class="primary" id="generate">Generate</button>
-      <div class="hint" id="genStale" style="display:none">These settings have changed since the map below was
-        drawn &mdash; press Generate to apply them. Nothing is ever rendered on its own: every tab draws only
-        when you ask it to.</div>
+      <div class="hint" id="genStale" style="display:none">These settings have changed since the map below was drawn &mdash; press Generate to apply them.</div>
       <a class="small-btn" id="genDownload" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download this map</a>
 
       <div class="error" id="genError" style="display:none"></div>
@@ -926,13 +937,13 @@
 
       <div id="hiddenSection" style="display:none">
         <h2 style="margin-top:20px">Hidden countries</h2>
-        <div class="hint">Still land: unowned on this map, but real coastline, heightmap, terrain and provinces &mdash; so a strait stays a strait. The mod turns them into impassable wasteland owned by the country they border most.</div>
+        <div class="hint">Still land: unowned here, but real coastline, heightmap, terrain and provinces, so a strait stays a strait.</div>
         <div id="hiddenList"></div>
       </div>
 
       <div id="removedSection" style="display:none">
         <h2 style="margin-top:20px">Removed countries</h2>
-        <div class="hint">Taken off the map entirely: their land becomes sea on every tab, as if they had never been there. Use this rather than Hide when a neighbour is simply in the way (mainland Europe on a British Isles map). A removed country is also dropped from the selection, and the frame no longer counts it. One limit: a neighbour's border with a removed country is a land border in GADM, so that newly exposed shore is not seen as coastline by strait fixing or island separation.</div>
+        <div class="hint">Off the map entirely: their land becomes sea on every tab. Use it when a neighbour is simply in the way.</div>
         <div id="removedList"></div>
       </div>
     </div>
@@ -950,11 +961,11 @@
       </div>
       <label for="rvSpacing">Target spacing between rivers (px)</label>
       <input type="number" id="rvSpacing" min="2" max="2000" step="1">
-      <div class="hint">Rivers are added, highest discharge first, until a continent's rivers are this many pixels apart on average (its land area in view divided by its river length). In pixels, so a world map automatically gets far fewer rivers than a Europe map, and a river-dense continent (South America) a lower percentage than Europe. 70&nbsp;px is about what 5% gives for Europe on a Europe-wide map. It's an average over the whole continent, so its river-rich parts stay denser than its dry ones.</div>
+      <div class="hint">Rivers are added, biggest first, until a continent's rivers are this many pixels apart on average &mdash; so it follows the zoom and each continent's own density.</div>
 
       <label>Rivers shown: top % by discharge, per continent</label>
       <div id="rvContinents" class="rv-continents"></div>
-      <div class="hint">For each continent, only this share of its HydroRIVERS segments in the view with the highest average discharge is drawn (plus everything downstream of them, so every river runs on to its mouth). Lower it for wide views. Continents are HydroSHEDS drainage regions, so a whole river basin shares one value: &ldquo;Europe&rdquo; includes Turkey, the Caucasus, Iran, Arabia and the Caspian basin; Oceania includes Indonesia and the Philippines.</div>
+      <div class="hint">Share of a continent's river segments drawn, by discharge, plus everything downstream of them. Continents are drainage basins, not political ones.</div>
 
       <label>River network</label>
       <div class="radio-row">
@@ -973,15 +984,15 @@
         <input type="checkbox" id="rvBorders" checked>
         <label for="rvBorders" class="inline-label">Fit river borders</label>
       </div>
-      <div class="hint">Across lakes: the Nile isn't cut by Lake Nasser, nor the Dnieper by its reservoirs. Mouths: where the map's coastline lies beyond the river data's (deltas, estuaries, polders), the river is continued to the nearest sea or to a river that reaches it. Dead ends: rivers ending in the desert or any inland sink other than a lake (Arabian and Saharan wadis, the Tarim) are left out before the percentages are computed. River borders (<code>river_borders.json</code>: the Rhine, Danube, Rio Grande, Mekong, ...): the river is moved onto the border, and where the river rules keep it off, the border is moved to the river instead; the river always stays on one side of it. The fitted country map is downloaded below &mdash; use it with <code>rivers.bmp</code>.</div>
+      <div class="hint">Rivers run across lakes, mouths are continued to the sea over the ground, inland dead ends are dropped, and river borders are fitted to the rivers.</div>
 
       <label for="rvMinLen">Remove rivers shorter than (px)</label>
       <input type="number" id="rvMinLen" value="10" min="0" max="10000" step="1">
-      <div class="hint">A river is a branch from its source to where it joins another river, or a whole river on its own. Branches reaching the image edge and the lower course of a river at its mouth are kept. 0 keeps everything.</div>
+      <div class="hint">A branch from its source to its confluence, or a whole river. Edge branches and lower courses are kept. 0 keeps everything.</div>
 
       <label for="rvBranches">Most branches in one river</label>
       <input type="number" id="rvBranches" min="0" max="2000" step="1">
-      <div class="hint">A river network is a whole basin: every tributary that touches it, drawn as one connected set of pixels. <b>The game walks each network when it loads the map, at a cost that grows far faster than the network does</b>, and our maps are 20&ndash;30&times; finer than the game's own, so a basin like the Danube fuses into one river the size of the map &mdash; measured on a 4096&times;3072 Yugoslavia map, 623 branches in one river, the game never finished loading in 6&nbsp;minutes (60&nbsp;s for the same map with no rivers at all). Vanilla's biggest river has 26 branches and spans an eighth of the map. Over this many branch points, the network is cut into several at its smallest confluences &mdash; the fewest cuts that do it, one pixel each, the gap hidden where a tributary meets its parent, and each piece gets its own green source. Measured: 50 &rarr; 20 cuts, 140&nbsp;s to load; 24 &rarr; 43 cuts, 65&nbsp;s. 0 turns the limit off (the map may then take minutes to load, or never finish).</div>
+      <div class="hint">A whole basin is one network, and the game loads a big one very slowly: over this many branch points it is cut at its smallest confluences, one pixel each. 0 = no limit (the map may then never finish loading).</div>
 
       <button class="primary" id="rvRender">Render rivers</button>
       <a class="small-btn" id="rvBmp" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download rivers.bmp</a>
@@ -989,7 +1000,7 @@
       <div class="error" id="rvError" style="display:none"></div>
       <div class="meta" id="rvMeta"></div>
       <div id="rvLegend" style="margin-top:14px"></div>
-      <div class="hint">Uses the Countries tab's view and the Land/Sea settings. Drawn as Hearts of Iron IV's <code>rivers.bmp</code> (8-bit indexed, the game's palette): land white, sea and lakes grey; rivers are 1&nbsp;px wide, coloured by discharge from light cyan (smallest) to dark navy (largest); each river network starts with one green source pixel on its main river, and every tributary ends with a red flow-in pixel where it joins, continuous through side-adjacent pixels only (a corner-to-corner touch doesn't count).</div>
+      <div class="hint">Uses the Countries tab's view and the Land/Sea settings. Drawn as HOI4's <code>rivers.bmp</code>: 1&nbsp;px rivers coloured by discharge, one green source per network, a red flow-in per tributary.</div>
     </div>
 
     <div class="center" id="rvImageArea">
@@ -1004,28 +1015,28 @@
     <div class="panel">
       <label for="stTarget">Target state size (px)</label>
       <input type="number" id="stTarget" min="10" max="10000000" step="100">
-      <div class="hint">Each country gets the GADM level (0 = the whole country, 1 = regions, 2 = departments / districts, ... 5) whose subdivisions in view are at most this size on average &mdash; the coarsest such level, so states come out a little small and get merged rather than too big (if every level is bigger: the finest). Always at least level 1, unless the country itself is smaller than the merge size below. Default: the vanilla HOI4 map's average state (3,400&nbsp;px on its 5632&times;2048 map; median 1,300).</div>
+      <div class="hint">The coarsest GADM level whose subdivisions in view average at most this, at least level 1. Default: vanilla's average state (3,400&nbsp;px).</div>
       <label for="stMerge">Merge states smaller than (px)</label>
       <input type="number" id="stMerge" min="0" max="10000000" step="100">
-      <div class="hint">Smallest first, each small state joins a neighbour in the same larger GADM subdivision (a district within its region; if it has no neighbour there, one level up; never across a country): a neighbour that is also too small and that the merge lifts above the size first, else the one it shares the longest border with. The merged state keeps the larger one's name; populations are added (GHS-POP 2025 per GADM subdivision when downloaded, else GeoNames places). Islands with no neighbour stay as they are. 0 = no merging.</div>
+      <div class="hint">Smallest first, each small state joins a neighbour in the same larger subdivision, never across a country; the merged state keeps the more populated one's name. 0 = no merging.</div>
       <label>Density</label>
       <div class="ls-form" style="grid-template-columns:1fr 1fr;margin-top:0;align-items:center">
         <span class="hint" style="margin:0">Sparse land: up to &times;</span><input type="number" id="stDensSparse" step="0.5">
         <span class="hint" style="margin:0">Dense land: down to &divide;</span><input type="number" id="stDensDense" step="0.5">
         <span class="hint" style="margin:0">Normal at (people/km&sup2;)</span><input type="number" id="stDensRef" step="10">
       </div>
-      <div class="hint">Like the provinces: state sizes follow the population density (GHS-POP) &mdash; each country's target and merge size &times; &radic;(reference / density), from &divide; the dense factor to &times; the sparse one, and each state's merge size by its own density &mdash; times the country's factor in the list on the right. 1 = off.</div>
+      <div class="hint">State sizes follow the population density: size &times; &radic;(reference / density), times the country's factor. 1 = off.</div>
       <div class="radio-row" style="margin-top:8px">
         <input type="checkbox" id="stRivers" checked>
         <label for="stRivers" class="inline-label">Follow the rivers (Rivers tab settings)</label>
       </div>
-      <div class="hint">States always follow the country borders exactly &mdash; with this on, those of the Rivers tab's country map fitted to the rivers. Where a state border comes within 3&nbsp;px of a river, it is moved onto the river (never across a country border).</div>
+      <div class="hint">States follow the country borders exactly; a state border within 3&nbsp;px of a river is moved onto the river.</div>
       <button class="primary" id="stRender">Render states</button>
       <a class="small-btn" id="stPng" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download states.png</a>
       <a class="small-btn" id="stCsv" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download states.csv</a>
       <div class="error" id="stError" style="display:none"></div>
       <div class="meta" id="stMeta"></div>
-      <div class="hint">Colours: each state is a slight variation of its country's colour, unique over the whole map (neighbouring states of a country kept visibly apart).</div>
+      <div class="hint">Each state is a variation of its country's colour, unique over the whole map.</div>
     </div>
     <div class="center" id="stImageArea">
       <div class="placeholder">Pick countries in the Countries tab, then click "Render states".</div>
@@ -1036,7 +1047,7 @@
         <h2>Countries</h2>
         <button class="link-btn" id="stResetLevels" style="display:none">Auto for all</button>
       </div>
-      <div class="hint" id="stListHint" style="margin-top:0">Subdivision level of each visible country: Auto picks the coarsest GADM level whose states average at most the target size (at least level 1); choose another to override it (count &times; average size in view).</div>
+      <div class="hint" id="stListHint" style="margin-top:0">Auto picks each country's level; choose another to override it (count &times; average size in view).</div>
       <div id="stCountries" style="margin-top:6px"></div>
     </div>
   </div>
@@ -1051,13 +1062,13 @@
         <span class="hint" style="margin:0">min</span><input type="number" id="pvLandMin" step="10">
         <span class="hint" style="margin:0">max</span><input type="number" id="pvLandMax" step="10">
       </div>
-      <div class="hint">Cut out of the States tab's states (same settings, rules and rivers): GADM subdivisions at the coarsest level averaging at most the maximum, split into compact pieces above it, merged within their state below the minimum. Vanilla: mean 400&nbsp;px, median 160.</div>
+      <div class="hint">Cut out of the States tab's states: split above the maximum, merged within their state below the minimum. Vanilla: mean 400&nbsp;px.</div>
       <label>Sea provinces (px)</label>
       <div class="ls-form" style="grid-template-columns:auto 1fr auto 1fr;margin-top:0;align-items:center">
         <span class="hint" style="margin:0">min</span><input type="number" id="pvSeaMin" step="100">
         <span class="hint" style="margin:0">max</span><input type="number" id="pvSeaMax" step="100">
       </div>
-      <div class="hint">Each sea cut into compact cells between the two sizes, within one country's EEZ; every lake is one lake province (or one per country, see below). Vanilla: mean 2,370&nbsp;px.</div>
+      <div class="hint">Each sea cut into cells between these sizes, inside one country's EEZ; every lake is one province. Vanilla: mean 2,370&nbsp;px.</div>
       <label>Density</label>
       <div class="ls-form" style="grid-template-columns:1fr 1fr;margin-top:0;align-items:center">
         <span class="hint" style="margin:0">Sparse land: up to &times;</span><input type="number" id="pvDensityFactor" step="0.5">
@@ -1065,20 +1076,20 @@
         <span class="hint" style="margin:0">Normal at (people/km&sup2;)</span><input type="number" id="pvDensityRef" step="10">
         <span class="hint" style="margin:0">Open sea: up to &times;</span><input type="number" id="pvSeaFar" step="0.5">
       </div>
-      <div class="hint">Land province sizes follow the population density (GHS-POP, Download tab), not how fine a country's administrative units are: size &times; &radic;(reference / density), from &divide; the dense factor (cities, Belgium, the Netherlands) up to &times; the sparse one (deserts, taiga, tundra). Provinces aim at &radic;(min &times; max) scaled that way, are split above the maximum and merged below half the aim (or the minimum). Sea provinces grow with the distance from the coast, up to their factor. 1 = off.</div>
+      <div class="hint">Land province sizes follow the population density, not how fine the admin units are; sea provinces grow away from the coast. 1 = off.</div>
       <label for="pvRiverSplit">Split provinces crossed by a river from (px)</label>
       <input type="number" id="pvRiverSplit" step="10">
-      <div class="hint">A land province at least this big that a river cuts in two is split along the river (each piece at least 40&nbsp;px). 0 = off. Bits of a province left across a river, too small to be a province, go to the province on their side of the river when it is in the same state. Provinces under 20&nbsp;px are merged into a neighbour (islets and microstates with no neighbour of their own country excepted). Lakes: bordered by one country &rarr; its state with the longest shore; by several &rarr; the country with the longest shore, or, from 100&nbsp;px, divided along the GADM border when every part keeps 40&nbsp;px.</div>
+      <div class="hint">A land province this big that a river cuts in two is split along it, each piece at least 40&nbsp;px. 0 = off. A river's source is extended to the province border, so it cuts the province it ends in too.</div>
       <label for="pvTarget">Target number of provinces</label>
       <input type="number" id="pvTarget" step="500" min="0" max="22367">
-      <div class="hint">0 = off. Otherwise the land provinces' sizes (min, max, river split) are scaled together so that land + sea + lakes come out at about this total (typically within 1%); the sea and lakes keep their own settings, so their count doesn't change. The scale used is shown after the render.<br><b>At most 22,367.</b> Hearts of Iron IV draws at most 65,535 province borders (one per pair of neighbouring provinces, about 2.93 per province) and stops drawing them over large parts of the map past that -- a limit hardcoded in the game, the same at any map size. Whatever the settings, pairs of small land provinces are merged at the end until the map is under it; the border count is shown after the render.</div>
+      <div class="hint">0 = off. The land sizes are scaled together to reach this total; the sea and lakes keep theirs. <b>At most 22,367</b> &mdash; the game draws only 65,535 province borders, whatever the map's size.</div>
       <label>City provinces</label>
       <div class="ls-form" style="grid-template-columns:1fr auto;margin-top:0;align-items:center">
         <span class="radio-row" style="margin:0"><input type="checkbox" id="pvCities"><label for="pvCities" class="inline-label">Give cities their own province</label></span><span></span>
         <span class="hint" style="margin:0">Cities of classes 1 to</span><input type="number" id="pvCityClasses" min="1" max="8" step="1">
         <span class="hint" style="margin:0">At least (px)</span><input type="number" id="pvCityMin" min="20" step="5">
       </div>
-      <div class="hint">Each City-tab city of those classes gets a province shaped on the Terrain tab's urban area it lies on (within its state; several cities on one urban area share it), grown to the minimum size with the nearest land of its state. City provinces are never merged with their neighbours, their terrain is urban, and <code>province_states.csv</code> names them (column <code>city</code>). Uses the City and Terrain tabs' current settings.</div>
+      <div class="hint">Each City-tab city of those classes gets a province on the Terrain tab's urban area it lies on, never merged, its terrain urban.</div>
       <button class="primary" id="pvRender">Render provinces</button>
       <label for="pvBorders" style="margin-top:12px">Display</label>
       <div class="ls-form" style="grid-template-columns:1fr auto;margin-top:0;align-items:center">
@@ -1097,7 +1108,7 @@
       <a class="small-btn" id="pvStatesPng" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download states_from_provinces.png</a>
       <div class="error" id="pvError" style="display:none"></div>
       <div class="meta" id="pvMeta"></div>
-      <div class="hint">Every province is one piece; no two provinces touch only by a corner (X-crossing) nor along more than one stretch. <code>definition.csv</code>: id;R;G;B;land/sea/lake;coastal;terrain;continent &mdash; terrain = the province's most common Terrain-tab type, continent in the game's numbering (1 Europe &hellip; 7 Middle East). <code>province_states.csv</code>: each land and lake province's state (for the state files) &mdash; the states are exactly their provinces (where an X-crossing fix moved a pixel across a state border, the state follows; <code>states_from_provinces.png</code> shows them). Colours: land = variations of the state's colour, sea = variations of #191F61 tinted by the EEZ, lakes = a lake blue tinted by the state; all unique. Uses the Countries tab's view and the Rivers, States and Terrain tabs' settings.</div>
+      <div class="hint">Every province is one piece, with no X-crossing and no double contact. Writes <code>provinces.bmp</code>, <code>definition.csv</code> and <code>province_states.csv</code> &mdash; the states are exactly their provinces.</div>
     </div>
     <div class="center" id="pvCenter" style="flex-direction:column;align-items:stretch;justify-content:flex-start">
       <div id="pvCount" class="meta" style="font-size:15px;font-weight:600;margin:0 0 10px;text-align:center"></div>
@@ -1110,7 +1121,7 @@
         <h2>Countries</h2>
         <button class="link-btn" id="pvResetFactors" style="display:none">All to 1</button>
       </div>
-      <div class="hint" style="margin-top:0">Size factor per country: its land provinces' size limits are multiplied by it (on top of the density), e.g. 2 = about twice as big, 0.5 = half. Applied at the next render.</div>
+      <div class="hint" style="margin-top:0">Size factor per country, on top of the density: 2 = about twice as big. Applied at the next render.</div>
       <div id="pvCountries" style="margin-top:6px"></div>
     </div>
   </div>
@@ -1125,16 +1136,16 @@
         <span class="hint" style="margin:0">min</span><input type="number" id="srLandMin" step="500">
         <span class="hint" style="margin:0">max</span><input type="number" id="srLandMax" step="1000">
       </div>
-      <div class="hint">Made of whole states (the game wants every province of a state in one region). Merged below the minimum, aiming at about &radic;(min &times; max); above the maximum only when a single state is bigger. Vanilla: 5% under 3,800&nbsp;px, median 13,400, 5% over 52,900.</div>
+      <div class="hint">Whole states only, merged below the minimum, aiming at &radic;(min &times; max). Vanilla: median 13,400&nbsp;px.</div>
       <label>Sea regions (px)</label>
       <div class="ls-form" style="grid-template-columns:auto 1fr auto 1fr;margin-top:0;align-items:center">
         <span class="hint" style="margin:0">min</span><input type="number" id="srSeaMin" step="1000">
         <span class="hint" style="margin:0">max</span><input type="number" id="srSeaMax" step="5000">
       </div>
-      <div class="hint">Made of sea provinces: small along the coasts and in enclosed seas, large in the open ocean (up to the maximum). Vanilla: 5% under 7,900&nbsp;px, median 67,000, 5% over 190,000.</div>
+      <div class="hint">Sea provinces: small along the coasts and in enclosed seas, large offshore. Vanilla: median 67,000&nbsp;px.</div>
       <label for="srIsland">Islands into sea regions, under (px)</label>
       <input type="number" id="srIsland" step="100" min="0">
-      <div class="hint">An island (states joined by land) smaller than this goes, whole, to the sea region it borders most; larger ones get land regions. An island whose own region would have its centre outside it joins the sea around it whatever its size. Vanilla: islands up to ~3,500&nbsp;px in sea regions. 0 = never.</div>
+      <div class="hint">An island smaller than this joins the sea region it borders most, whole; larger ones get land regions. 0 = never.</div>
       <div class="radio-row"><input type="checkbox" id="srByCountry"><label for="srByCountry" class="inline-label">Keep countries apart where possible</label></div>
       <button class="primary" id="srRender">Make strategic regions</button>
       <label for="srBorders" style="margin-top:12px">Display</label>
@@ -1149,7 +1160,7 @@
       <a class="small-btn" id="srPng" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download strategic_regions.png (as shown)</a>
       <div class="error" id="srError" style="display:none"></div>
       <div class="meta" id="srMeta"></div>
-      <div class="hint">Every province gets exactly one region, no region is empty, every state is in one region, an island in a sea region is there whole, each region is one connected piece, and <b>each region's centre lies within it</b> &mdash; the mean of its pixels (all of the 2&times;2 pixels around it, so the rounding doesn't matter) and the mean of its provinces' centres. The zip holds <code>map/strategicregions/</code> (one file per region, sea regions with their <code>naval_terrain</code> &mdash; fjords / archipelago where islands are many or the water is narrow, shallow sea on the continental shelf (NASA bathymetry, Download tab), deep ocean far from land and deeper than 3,000&nbsp;m, else ocean &mdash; and its weather: 12 monthly periods from the Download tab's climate normals &mdash; ERA5 1991-2020, averaged over the region &mdash; converted to the game's temperatures and odds of rain, snow, blizzards, mud, sandstorms and arctic water by formulas fitted on the game's own regions; a neutral placeholder without the data), <code>map/weatherpositions.txt</code> (one big and one small weather object per region, at its centre &mdash; the game crashes without them), the region names (<code>localisation/english/strategic_region_names_l_english.yml</code>) and a CSV. Uses the Provinces tab's current settings (and so every other tab's).</div>
+      <div class="hint">The zip holds <code>map/strategicregions/</code> with each sea region's naval terrain and weather, <code>weatherpositions.txt</code>, the region names and a CSV. Uses the Provinces tab's current settings.</div>
     </div>
     <div class="center" id="srCenter" style="flex-direction:column;align-items:stretch;justify-content:flex-start">
       <div id="srCount" class="meta" style="font-size:15px;font-weight:600;margin:0 0 10px;text-align:center"></div>
@@ -1170,7 +1181,7 @@
     <div class="panel">
       <label for="mxName">Mod name</label>
       <input type="text" id="mxName" maxlength="80">
-      <div class="hint">The folder is its ASCII form, in your Hearts of Iron IV <code>mod</code> folder, next to your other mods (a mod of the same name is replaced; no other mod is touched).</div>
+      <div class="hint">The folder is the name's ASCII form, in your Hearts of Iron IV mod folder. A mod of the same name is replaced; no other mod is touched.</div>
       <label for="mxManpower">Manpower (% of today's population)</label>
       <input type="number" id="mxManpower" min="1" max="1000" step="1">
       <label for="mxInfra">Infrastructure (every state)</label>
@@ -1180,17 +1191,17 @@
         <input type="checkbox" id="mxThumb" checked>
         <label for="mxThumb" class="inline-label">Render the map for the mod's picture</label>
       </div>
-      <div class="hint"><code>thumbnail.png</code>, 512&times;512, is what the launcher and the Workshop show: the mod's own map rendered the way the game draws it zoomed out (terrain, water, rivers, country colours and borders), cut to a square around the middle of the map, with the mod's name across it in the map font &mdash; white with the game's soft dark edge. Adds about 20&nbsp;s to the export; unticked, the Countries tab's map is used instead (the name is written on it all the same).</div>
+      <div class="hint"><code>thumbnail.png</code>, 512&times;512: this mod's own map rendered the way the game draws it, with the mod's name across it. Adds about 20&nbsp;s.</div>
       <label for="mxGameDir">Hearts of Iron IV folder</label>
       <div style="display:flex;gap:6px"><input type="text" id="mxGameDir" style="flex:1;min-width:0" placeholder="Found automatically"><button id="mxGameBrowse" type="button">Browse&hellip;</button></div>
       <label for="mxModDir">Mod folder</label>
       <div style="display:flex;gap:6px"><input type="text" id="mxModDir" style="flex:1;min-width:0" placeholder="Found automatically"><button id="mxModBrowse" type="button">Browse&hellip;</button></div>
-      <div class="hint">Leave empty to use the folders found automatically (Steam libraries, GOG, Microsoft Store; the mod folder is <code>Documents/Paradox Interactive/Hearts of Iron IV/mod</code>). Set them if the tool can't find them: the game folder holds <code>hoi4.exe</code>.</div>
+      <div class="hint">Leave empty to use the folders found automatically. The game folder is the one holding <code>hoi4.exe</code>.</div>
       <div class="error" id="mxPathError" style="display:none"></div>
       <button class="primary" id="mxExport">Export the mod</button>
       <div class="error" id="mxError" style="display:none"></div>
       <div class="meta" id="mxGame"></div>
-      <div class="hint">Uses every tab's current settings: the Strategic regions tab's request (which carries the Provinces tab's and so all the others'). Writes the whole map (provinces, heightmap, terrain, rivers, trees, normal map, colour map, water and fog-of-war textures, cities), the states (owner, cores, provinces, manpower, victory points from the City tab), the strategic regions and weather, buildings / unit positions, railways and supply nodes, sea crossings over straits, one country per map country (own tags, its GADM name, its real flag &mdash; Download tab &rarr; Country flags &mdash;, non-aligned, one infantry division each), a 1936 bookmark and localisation in every language. The base game's countries aren't loaded, its country-specific files are emptied and every remaining reference to them is cleaned out. No factories or resources yet.</div>
+      <div class="hint">Uses every tab's current settings and writes the whole map, the states, the strategic regions and their weather, one country per map country and the localisation. No factories or resources yet.</div>
     </div>
     <div class="center" style="flex-direction:column;align-items:stretch;justify-content:flex-start">
       <div id="mxStatus" class="meta" style="font-size:15px;font-weight:600;margin:0 0 10px;text-align:center">Not exported yet.</div>
@@ -1209,20 +1220,31 @@
         <option value="raw">NASA topography, as reprojected</option>
         <option value="normal">Normal map (world_normal.bmp)</option>
       </select>
-      <div class="hint">HOI4 levels: sea and lakes come from the country map (its Land/Sea steps), not from NASA, whose coastline doesn't match: water is a flat 89, the coast pixel 94 rising into the terrain over ~5 px, land at least 96, and NASA's heights are mapped onto the vanilla map's range (up to 239 for the Himalaya).</div>
+      <div class="hint">HOI4 levels: sea and lakes come from the country map, never from the elevation data, whose coastline doesn't match. Water 89, coast 94, land from 96 up.</div>
 
       <label for="hmRelief">Exaggerate lower mountain ranges (max &times;)</label>
       <input type="number" id="hmRelief" value="4" min="1" max="4" step="0.1">
-      <div class="hint">Next to the Himalaya or the Iranian ranges, lower ones (Scandes, Appalachians, Sudetes, Scottish Highlands, Urals) look flat. Each range's relief above and below its surroundings (~80&nbsp;km around) is multiplied by up to this factor &mdash; the lower the range, the more (ranges rising ~1000&nbsp;m or more above their surroundings keep their shape); plains are left flat. 1 = off. Applies to the HOI4 heightmap and the normal map.</div>
+      <div class="hint">Lower ranges (Scandes, Appalachians, Urals) look flat beside the Himalaya: each range's relief is multiplied by up to this factor, the lower the more. 1 = off.</div>
 
-      <div class="hint">Normal map: the surface direction per pixel, computed from the HOI4 heightmap as in the vanilla <code>world_normal.bmp</code> (24-bit RGB, half the heightmap's size; red = east-west, green = north-south, blue = facing up; flat = 128,128,255). It adds the terrain shading in game.</div>
+      <details class="tr-sec" id="hmShapeBox">
+        <summary>How the factor is worked out</summary>
+        <div class="tr-grid">
+          <div><label for="hmReliefRef">Range left alone above (m)</label><input type="number" id="hmReliefRef" value="1000" min="50" max="20000" step="50"></div>
+          <div><label for="hmReliefExp">Falloff exponent</label><input type="number" id="hmReliefExp" value="0.6" min="0" max="3" step="0.05"></div>
+          <div><label for="hmReliefFlat">Left flat below (m)</label><input type="number" id="hmReliefFlat" value="60" min="0" max="5000" step="5"></div>
+          <div><label for="hmReliefFull">Full factor from (m)</label><input type="number" id="hmReliefFull" value="150" min="1" max="5000" step="5"></div>
+        </div>
+        <div class="hint">factor = (left alone &divide; the range's own relief) ^ exponent, capped by the maximum and faded to 1 between the last two. The defaults never ask for more than ~3.2.</div>
+      </details>
+
+      <div class="hint">Normal map: the surface direction per pixel, as in vanilla's <code>world_normal.bmp</code> (half the heightmap; flat = 128,128,255). It adds the terrain shading in game.</div>
 
       <label>Display</label>
       <div class="radio-row">
         <input type="checkbox" id="hmOverlay" checked>
         <label for="hmOverlay" class="inline-label">Show coastlines and borders</label>
       </div>
-      <div class="hint">Red lines: the country map's coastlines and borders, to check that the heightmap lines up with it. The download never includes them.</div>
+      <div class="hint">Red lines: the country map's coastlines and borders, to check the heightmap lines up. Never in the download.</div>
 
       <button class="primary" id="hmRender">Render heightmap</button>
       <a class="small-btn" id="hmBmp" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download heightmap.bmp</a>
@@ -1230,7 +1252,7 @@
       <a class="small-btn" id="hmDownload" style="display:none;margin-top:8px;text-align:center;text-decoration:none">Download as PNG</a>
       <div class="error" id="hmError" style="display:none"></div>
       <div class="meta" id="hmMeta"></div>
-      <div class="hint">Uses the Countries tab's view: NASA's Blue Marble topography (Download tab &rarr; Topography; 30 arc-seconds, ~1&nbsp;km) reprojected pixel by pixel onto the same frame and projection, bilinearly interpolated. NASA's raw values: black = sea level (and the sea), white = the highest peaks.</div>
+      <div class="hint">Uses the Countries tab's view: GMTED2010 in metres where its tiles are on disk, the NASA topography elsewhere, reprojected onto this frame.</div>
     </div>
 
     <div class="center" id="hmImageArea">
@@ -1247,40 +1269,40 @@
       <input type="number" id="ctTarget" min="0" max="100000" step="10">
       <label for="ctPopWeight">Weight by population (%)</label>
       <input type="number" id="ctPopWeight" min="0" max="100" step="5">
-      <div class="hint">How the number is shared out between the visible countries: 0 = by land in view only, 100 = by population in view only (the sum of its cities and towns in view, so a country half in the frame counts only that half), 50 = half of each.</div>
+      <div class="hint">How the number is shared between the visible countries: 0 = by land in view, 100 = by population in view, 50 = half of each.</div>
 
-      <div class="hint">Each country then shows its most populated cities, one by one, until it reaches its number (fewer if it has fewer). Adjust any country's number in the <b>Visible countries</b> list on the right &mdash; the others keep theirs.</div>
+      <div class="hint">Each country then shows its most populated cities until it reaches its number. Per-country numbers in the list on the right.</div>
 
       <div class="radio-row">
         <input type="checkbox" id="ctByRegion">
         <label for="ctByRegion" class="inline-label">Share each country's number between its regions too</label>
       </div>
-      <div class="hint">The same land / population split inside each country, between its first-level regions (England, Scotland, Wales, Northern Ireland; Russian oblasts; US states ...), so a country's most populous part doesn't take all of its cities. Hover a country on the right to see its regions.</div>
+      <div class="hint">The same split inside each country, between its first-level regions, so its most populous part doesn't take all of its cities.</div>
 
       <div class="radio-row">
         <input type="checkbox" id="ctUrban">
         <label for="ctUrban" class="inline-label">Hide towns inside a larger city's urban area</label>
       </div>
-      <div class="hint">A town within a larger city's urban radius (same country; about 15&ndash;20&nbsp;km for Paris, 7&nbsp;km for Lyon, from its population) is part of that city &mdash; Sevran, Palaiseau, Chatou are Paris &mdash; so it doesn't take one of its region's places; a town further out does.</div>
+      <div class="hint">A town inside a larger city's urban radius is part of that city and isn't picked on its own.</div>
 
       <label for="ctIsolated">Also show a city with no larger one within (px)</label>
       <input type="number" id="ctIsolated" min="0" max="5000" step="10">
-      <div class="hint">Regardless of the numbers: a city with no more populated city in view this close (on the same land) is always shown (on top of its country's number once that is full), so sparse regions &mdash; Lapland, Siberia, deserts &mdash; keep their local centres. 0 = off.</div>
+      <div class="hint">A city with no larger one in view this close is always shown, on top of its country's number, so sparse regions keep their centres. 0 = off.</div>
 
       <label for="ctMinPop">Never show cities under (inhabitants)</label>
       <input type="number" id="ctMinPop" min="0" step="1000">
 
       <label for="ctMinDist">Minimum distance between cities (px)</label>
       <input type="number" id="ctMinDist" min="0" max="500" step="1">
-      <div class="hint">A city closer than this to a larger shown city on the same land is skipped and its country's next one takes its place, so suburbs don't pile up on one spot. Cities across the sea never block each other (Saint Helier on Jersey and Cherbourg both show). 0 = off.</div>
+      <div class="hint">A city closer than this to a larger shown one is skipped and the next takes its place. Cities across the sea never block each other. 0 = off.</div>
 
       <label for="ctExempt">No minimum distance for classes 1 to</label>
       <input type="number" id="ctExempt" min="0" max="8" step="1">
-      <div class="hint">The largest cities are always shown, however close together (only a 3&nbsp;px floor; the lowest class never is): dense clusters of big cities, like the Rhine-Ruhr (K&ouml;ln, D&uuml;sseldorf, Essen, Dortmund, Duisburg), keep all their stars. 0 = no exception.</div>
+      <div class="hint">The largest classes are shown however close together (a 3&nbsp;px floor), so clusters like the Rhine-Ruhr keep all their stars. 0 = no exception.</div>
 
       <label for="ctIsland">Small islands: largest city only, under (px)</label>
       <input type="number" id="ctIsland" min="0" max="100000" step="1">
-      <div class="hint">A land area smaller than this shows its largest city alone, on top of the number above (it isn't counted in its country's land or number). 0 = off.</div>
+      <div class="hint">A land area smaller than this shows its largest city alone, on top of the number above. 0 = off.</div>
 
       <label for="ctClasses">Population classes</label>
       <input type="number" id="ctClasses" min="1" max="8" step="1">
@@ -1289,7 +1311,7 @@
         <option value="log">Equal steps in log(population)</option>
         <option value="count">Equal numbers of cities</option>
       </select>
-      <div class="hint">Per continent, among its shown cities; class 1 = the largest. Log steps: between the continent's smallest and largest shown city, each class spans the same population ratio (few cities in the top classes). Equal numbers: each class holds the same number of cities. Continents follow each city's country (GeoNames' assignment: Turkey, the Caucasus and the Middle East are Asia, Cyprus is Europe); Russia is split at the Urals (60&deg;E).</div>
+      <div class="hint">Per continent, among its shown cities; class 1 = the largest. Log steps: equal population ratios. Equal numbers: as many cities per class.</div>
 
       <label>City names</label>
       <div class="radio-row">
@@ -1307,7 +1329,7 @@
       </div>
       <label for="ctLabelPx">Name size (px, smallest class)</label>
       <input type="number" id="ctLabelPx" min="6" max="60" step="1">
-      <div class="hint" id="ctNamesHint">Names from GeoNames (Download tab &rarr; GeoNames Cities &rarr; Names + Country info). Always in Latin script: names in other scripts are romanized (Москва &rarr; Moskva, القاهرة &rarr; El-Q&acirc;hira); exonyms fall back to the endonym where the language has no name of its own (most towns). Placed from the largest city down, each beside its star where it overlaps no star or earlier name, else left out.</div>
+      <div class="hint" id="ctNamesHint">Names from GeoNames, always in Latin script (other scripts romanized). Placed largest first, beside the star wherever there is room.</div>
 
       <label for="ctStar">Star size (px)</label>
       <input type="number" id="ctStar" min="3" max="41" step="2">
@@ -1319,7 +1341,7 @@
       <div class="error" id="ctError" style="display:none"></div>
       <div class="meta" id="ctMeta"></div>
       <div id="ctLegend" style="margin-top:14px"></div>
-      <div class="hint">Uses the Countries tab's view and the Land/Sea settings. Cities: GeoNames, every place with at least 1,000 inhabitants (Download tab &rarr; GeoNames Cities); city districts and historical / abandoned places are left out. Parts of a city listed as separate places (Paris's arrondissements, Warsaw's districts, New York's boroughs) are merged into it, their populations added to its own (the CSV also lists the city's own GeoNames figure). Only cities on a shown country's land (a coastal city just off the map's coastline is moved onto it). Stars are drawn from the most to the least populated city, each one only where the larger ones left room, so a smaller city never covers a larger one. The CSV lists the drawn cities with their class, pixel position and alternate names.</div>
+      <div class="hint">Uses the Countries tab's view and the Land/Sea settings. GeoNames places of 1,000 people or more, city parts merged in, drawn most populated first so no star ever covers a larger one.</div>
     </div>
 
     <div class="center" id="ctImageArea">
@@ -1377,7 +1399,7 @@
           <input type="checkbox" id="trForestHills" data-key="forest_over_hills">
           <label for="trForestHills" class="inline-label">Draw forest above hills</label>
         </div>
-        <div class="hint">Heights from the Heightmap tab, with its &ldquo;exaggerate lower mountain ranges&rdquo; factor (default thresholds set with &times;4). Height <em>differences</em>, never the height itself: highest minus lowest point within the distance (like Paint.NET's Outline effect). A high flat plateau stays flat. Small distance = granular, detailed relief. Smoothing 1 = off.</div>
+        <div class="hint">Heights from the Heightmap tab, with its exaggeration. Height differences only, never the height itself, so a high plateau stays flat. Small distance = granular relief.</div>
       </details>
 
       <details class="tr-sec" open>
@@ -1388,7 +1410,7 @@
           <div><label for="trJungleBlend">Sparse jungle edge (trees.bmp px)</label><input type="number" id="trJungleBlend" data-key="jungle_blend_px" step="1"></div>
           <div><label for="trTreeDensity">Tree density (% of land cover forest)</label><input type="number" id="trTreeDensity" data-key="tree_density" step="1"></div>
         </div>
-        <div class="hint">Forest and farmland are mixed with plains in the proportions of the example map. Patch size 0 = pixel speckle. Tropical evergreen forest (within 25&deg; of the equator) is jungle. In trees.bmp, jungle within the edge width of the jungle's border becomes sparse jungle (the blend, 0 = off). Tree density: trees.bmp covers that % of the land cover's forest area (100 = all of it); the thinnest forest is left out first.</div>
+        <div class="hint">Forest and farmland mixed with plains in the proportions of the example map. Patch size 0 = pixel speckle. Tree density: the share of the land cover's forest kept in <code>trees.bmp</code>.</div>
       </details>
 
       <details class="tr-sec" open>
@@ -1398,7 +1420,7 @@
           <div><label for="trTransition">Grass/desert transition (km)</label><input type="number" id="trTransition" data-key="transition_km" step="5"></div>
           <div><label for="trColdLat">Cold from latitude (&deg;)</label><input type="number" id="trColdLat" data-key="cold_lat" step="1"></div>
         </div>
-        <div class="hint">The land cover's bare / sparse vegetation is hot desert below the cold latitude, pixel by pixel: sand with ~35% rocky patches (smoothing = patch size); hills standing on it become desert hills (493B0F, outlined in AE00FF) and mountains desert mountains (F3C793) where bare ground makes up at least a quarter of the land within 10&nbsp;km (so bare rock in the Alps or the Caucasus stays normal mountains). Beyond the cold latitude it's snowy plains. Transition: grass and shrubs near hot desert get speckled FF00F0, denser where desert covers more of the surroundings within that distance (0 = off). Much of Central Asia (Betpak-Dala, Moyynkum) is shrubland in the land cover, so it stays plains with the transition only near bare ground.</div>
+        <div class="hint">Bare / sparse land is hot desert below the cold latitude and snowy plains above it; hills and mountains standing on it take their desert textures. Transition 0 = off.</div>
       </details>
 
       <details class="tr-sec" open>
@@ -1426,18 +1448,18 @@
           <div><label for="trDiscR2">Class 2 radius (px)</label><input type="number" id="trDiscR2" data-key="city_disc_r2" step="0.5"></div>
           <div><label for="trDiscR3">Class 3 radius (px)</label><input type="number" id="trDiscR3" data-key="city_disc_r3" step="0.5"></div>
         </div>
-        <div class="hint">Uses the City tab's current settings (number of cities, classes, overrides): every city of classes 1-3 gets a round urban area of that radius, on top of the land cover's. 0 = none for that class.</div>
+        <div class="hint">Uses the City tab's current settings: every city of classes 1&ndash;3 gets a round urban area of that radius. 0 = none for that class.</div>
         <div class="hint" id="trCityInfo"></div>
         <div class="tr-grid" style="margin-top:8px">
           <div><label for="trLightGain">City lights brightness</label><input type="number" id="trLightGain" data-key="light_gain" step="0.1"></div>
           <div><label for="trLightGlow">City lights glow (px)</label><input type="number" id="trLightGlow" data-key="light_glow_px" step="0.1"></div>
         </div>
-        <div class="hint">Night lights in the colour map's alpha: every urban pixel of the terrain glows; brightness multiplies it, glow blurs it (colour map pixels, half the terrain's).</div>
+        <div class="hint">Night lights in the colour map's alpha, from the terrain's urban pixels: brightness multiplies it, glow blurs it.</div>
       </details>
 
       <button class="link-btn" id="trResetSettings" style="margin-top:8px">Reset all settings to defaults</button>
       <div id="trLegend" style="margin-top:14px"></div>
-      <div class="hint">Uses the Countries tab's view. Land types from the Copernicus land cover (100&nbsp;m, 2015), relief from the NASA topography (Download tab). Output: Hearts of Iron IV's <code>terrain.bmp</code>, 8-bit indexed with the game's palette (indices as in <code>00_terrain.txt</code>). The raw land cover export is an indexed PNG whose pixel values are the Copernicus class codes.</div>
+      <div class="hint">Uses the Countries tab's view: the Copernicus land cover plus the Heightmap tab's relief, written as HOI4's <code>terrain.bmp</code> with the game's palette.</div>
     </div>
 
     <div class="center" id="trImageArea">
@@ -1476,21 +1498,62 @@
 
 <script>
 // ---------- tabs ----------
+// MANUAL.md's heading anchor per tab: the long explanation of every setting
+// lives there, not in the page (/manual is served by app.py).
+const TAB_MANUAL = { download: 'download', landsea: 'landsea', generate: 'countries',
+                     rivers: 'rivers', states: 'states', heightmap: 'heightmap', cities: 'city',
+                     terrain: 'terrain', provinces: 'provinces', strategic: 'strategic-regions',
+                     hoi4mod: 'hoi4-mod' };
+function setTabManual(tab) {
+  document.getElementById('tabManual').href = '/manual#' + (TAB_MANUAL[tab] || '');
+}
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('page-' + btn.dataset.tab).classList.add('active');
+    setTabManual(btn.dataset.tab);
   });
 });
+setTabManual((document.querySelector('.tab-btn.active') || {}).dataset?.tab || 'generate');
 
 // ---------- tab: heightmap ----------
 const hmOverlay = document.getElementById('hmOverlay');
 const hmMode = document.getElementById('hmMode');
 const hmRelief = document.getElementById('hmRelief');
-try { const r = localStorage.getItem('mapTool.relief'); if (r) hmRelief.value = r; } catch (e) { /* storage unavailable */ }
-hmRelief.addEventListener('keydown', e => { if (e.key === 'Enter') hmRender(); });
+// The relief settings: the cap and the shape of the factor (core.RELIEF_DEFAULTS).
+const HM_RELIEF_INPUTS = { relief: hmRelief, relief_ref_m: document.getElementById('hmReliefRef'),
+                           relief_exponent: document.getElementById('hmReliefExp'),
+                           relief_flat_m: document.getElementById('hmReliefFlat'),
+                           relief_full_m: document.getElementById('hmReliefFull') };
+const HM_RELIEF_DEFAULTS = Object.fromEntries(Object.entries(HM_RELIEF_INPUTS).map(([k, el]) => [k, el.value]));
+try {
+  const saved = JSON.parse(localStorage.getItem('mapTool.relief') || 'null');
+  const values = saved && typeof saved === 'object' ? saved : { relief: saved };   // older form: just the factor
+  Object.entries(HM_RELIEF_INPUTS).forEach(([k, el]) => {
+    const v = Number(values[k] !== undefined && values[k] !== null ? values[k] : HM_RELIEF_DEFAULTS[k]);
+    el.value = String(Math.min(Math.max(v, Number(el.min)), Number(el.max)));      // a setting saved out of range
+  });
+} catch (e) { /* storage unavailable, or not JSON: the inputs keep their defaults */ }
+Object.values(HM_RELIEF_INPUTS).forEach(el =>
+  el.addEventListener('keydown', e => { if (e.key === 'Enter') hmRender(); }));
+
+// The relief settings as query params; throws if one is out of its input's range.
+function hmReliefParams() {
+  const out = {};
+  for (const [key, el] of Object.entries(HM_RELIEF_INPUTS)) {
+    const v = Number(el.value);
+    const lo = Number(el.min), hi = Number(el.max);
+    if (!(v >= lo && v <= hi)) {
+      throw new Error(`${el.previousElementSibling ? el.previousElementSibling.textContent : key} must be between ${lo} and ${hi}.`);
+    }
+    out[key] = v;
+  }
+  if (out.relief_flat_m >= out.relief_full_m) throw new Error('"Left flat below" must be under "Full factor from".');
+  try { localStorage.setItem('mapTool.relief', JSON.stringify(out)); } catch (e) { /* storage unavailable */ }
+  return out;
+}
 const hmRenderBtn = document.getElementById('hmRender');
 const hmError = document.getElementById('hmError');
 const hmMeta = document.getElementById('hmMeta');
@@ -1527,24 +1590,27 @@ async function hmRender() {
   hmShowError('');
   hmImageArea.innerHTML = '<div class="spinner"></div>';
   try {
-    const relief = Number(hmRelief.value);
-    if (!(relief >= 1 && relief <= 4)) throw new Error('The relief exaggeration must be between 1 (off) and 4.');
-    const params = new URLSearchParams({ ...view, relief });
-    try { localStorage.setItem('mapTool.relief', String(relief)); } catch (e) { /* storage unavailable */ }
+    const params = new URLSearchParams({ ...view, ...hmReliefParams() });
     const resp = await fetch(`/api/heightmap/meta?${params}`);
     const meta = await resp.json();
     if (!resp.ok) throw new Error(meta.error || 'Render failed');
     const h = meta.heightmap;
-    if (h.available === false) throw new Error('The topography is not downloaded: get it from the Download tab (Topography).');
+    if (h.available === false) throw new Error('No elevations are downloaded: get GMTED2010 land elevations (metres, the tiles your map covers) or the NASA Topographic Heightmap from the Download tab.');
+    const hmSrc = h.source === 'nasa'
+      ? 'NASA heightmap, steps of ' + h.nasa_m_per_step + ' m'
+      : 'GMTED ' + h.gmted_arcsec + '&Prime; (metres)' + (h.gmted_share < 1
+          ? ' over ' + Math.round(100 * h.gmted_share) + '% of the frame, the NASA heightmap elsewhere'
+          : '') + (h.gmted_tiles && h.gmted_tiles.length ? ', tiles ' + h.gmted_tiles.join(', ') : '');
     hmParams = params.toString();
     await hmShowImage();
     hmMeta.innerHTML = `
       <div><b>${meta.world ? 'World map' : meta.countries.map(c => escapeHtml(c.name)).join(', ')}</b> &middot; ${meta.width} &times; ${meta.height}px</div>
       <div>${escapeHtml(meta.projection_label)}</div>
-      <div>Source: ${h.source_arcsec}&Prime; per pixel (${h.reduce === 1 ? 'full resolution' : '1/' + h.reduce + ' resolution'}), tiles ${h.tiles.join(', ')}</div>
-      <div>Finest map pixel: ${(h.view_deg_per_px * 3600).toFixed(1)}&Prime;</div>
+      <div>Source: ${hmSrc}</div>
+      <div>Finest map pixel: ${h.view_arcsec_per_px}&Prime;</div>
       <div>Rendered in ${h.seconds} s</div>
-      ${h.relief_strength > 1 ? `<div>Relief: lower ranges exaggerated up to &times;${h.relief_strength} (${Math.round(100 * h.relief_boosted_share)}% of the land boosted, median &times;${h.relief_gain_p50})</div>` : '<div>Relief exaggeration off</div>'}
+      ${h.relief_strength > 1 ? `<div>Relief: lower ranges exaggerated up to &times;${h.relief_strength} (${Math.round(100 * h.relief_boosted_share)}% of the land boosted, median &times;${h.relief_gain_p50}, most &times;${h.relief_gain_max})</div>` : '<div>Relief exaggeration off</div>'}
+      ${h.relief_strength > 1 && Object.entries(HM_RELIEF_DEFAULTS).some(([k, v]) => k !== 'relief' && h[k] !== undefined && h[k] !== Number(v)) ? `<div>Factor: (${h.relief_ref_m}&nbsp;m &divide; the range's relief)<sup>${h.relief_exponent}</sup>, faded in from ${h.relief_flat_m} to ${h.relief_full_m}&nbsp;m</div>` : ''}
       ${meta.normal_size ? `<div>Normal map: ${meta.normal_size[0]} &times; ${meta.normal_size[1]}px (half size, as vanilla)</div>` : ''}`;
     document.getElementById('hmDownload').style.display = 'block';
     const bmp = document.getElementById('hmBmp');
@@ -1843,9 +1909,8 @@ function trLegendHtml(meta) {
   }
   if (trView.value === 'colormap' || trView.value === 'lights') {
     return '<h2 style="font-size:13px;margin:0 0 6px">Colour map</h2><div class="hint">'
-      + '<code>colormap_rgb_cityemissivemask_a.dds</code>, half the terrain&rsquo;s size: RGB = NASA Blue Marble (August) '
-      + 'with colours matched to the vanilla file, water flat blue (from the country map); alpha = city lights at night, '
-      + "from the terrain's urban pixels (land cover cities + the City tab discs).</div>";
+      + '<code>colormap_rgb_cityemissivemask_a.dds</code>, half the terrain&rsquo;s size: NASA Blue Marble matched '
+      + 'to the vanilla file, with the city lights in its alpha.</div>';
   }
   if (trView.value === 'trees') {
     const treeShare = t.trees.classes.reduce((a, c) => a + c.share, 0);
@@ -1913,11 +1978,9 @@ async function trRender() {
   trShowError('');
   trImageArea.innerHTML = '<div class="spinner"></div>';
   try {
-    const relief = Number(hmRelief.value);
-    if (!(relief >= 1 && relief <= 4)) throw new Error("The Heightmap tab's relief exaggeration must be between 1 (off) and 4.");
     // The City tab's settings, for the urban discs at its cities.
     const city = ctInfo ? { ...ctSettings(), counts: Object.entries(ctCounts).map(([k, v]) => `${k}:${v}`).join(',') } : {};
-    const params = new URLSearchParams({ ...view, ...city, ...settings, relief });
+    const params = new URLSearchParams({ ...view, ...city, ...settings, ...hmReliefParams() });
     const resp = await fetch(`/api/terrain/meta?${params}`);
     const meta = await resp.json();
     if (resp.status === 503 && meta.preparing) {
@@ -2083,7 +2146,7 @@ async function rvRender() {
            ${r.continents.filter(c => c.in_view).map(c =>
              `<div>${escapeHtml(c.name)}: top ${c.top_percent}%${r.auto_spacing_px ? ' (auto)' : ''} = discharge &ge; ${c.threshold_cms.toLocaleString()} m&sup3;/s, rivers ~${c.spacing_px} px apart</div>`).join('')}
            ${r.dead_end_segments ? `<div>${r.dead_end_segments.toLocaleString()} segments ending inland outside a lake left out</div>` : ''}
-           ${r.extended_mouths ? `<div>${r.extended_mouths} river mouth(s) extended to the sea (+${r.extended_px} px)</div>` : ''}
+           ${r.extended_mouths ? `<div>${r.extended_mouths} river mouth(s) extended to the sea (+${r.extended_px} px)${r.mouth_routing === 'elevation' ? ', following the elevation' : ' in a straight line (download the NASA topography to follow the elevation)'}</div>` : ''}
            ${r.border_fit && r.border_fit.river_px ? `<div>River borders: ${r.border_fit.stretches} in view, ${(100 * r.border_fit.on_side_px / r.border_fit.river_px).toFixed(1)}% of their river pixels on one side, ${(100 * r.border_fit.on_border_px / r.border_fit.river_px).toFixed(1)}% beside the other country; ${r.border_fit.moved_px.toLocaleString()} country px moved to fit</div>` : ''}
            <div>${r.short_removed.toLocaleString()} river(s) under ${r.min_length_px} px removed</div>
            <div>${r.river_px.toLocaleString()} river pixels, ${r.sources} river network(s), ${r.flow_ins} tributary junction(s)${r.network_cuts ? `, ${r.network_cuts} cut to keep every network under ${branches} branches` : ''}</div>`}`;
@@ -2443,6 +2506,10 @@ function formatBytes(bytes) {
 // key ("<resource_id>/<filename>") -> {resource_id, label, size_bytes, downloaded, state:{status,bytes,total,error}}
 const fileState = {};
 let pollTimer = null;
+let dlGroups = {};                      // group id -> {id, info, members}: the alternatives' cards
+const DL_STORE = 'mapTool.download';    // {groups: {<group id>: <resource id>}}: the sub-tab shown
+function dlSaved() { try { return JSON.parse(localStorage.getItem(DL_STORE) || '{}') || {}; } catch (e) { return {}; } }
+function dlSave(s) { try { localStorage.setItem(DL_STORE, JSON.stringify(s)); } catch (e) { /* storage unavailable */ } }
 
 function dlEta(s) {
   if (s === null || s === undefined) return '';
@@ -2501,6 +2568,17 @@ function renderControl(key) {
   if (el) el.innerHTML = controlHtml(key);
 }
 
+// A group's sub-tabs show what is on disk, and the hidden alternative's files
+// have no control to re-render, so the ticks are refreshed on their own.
+function dlRefreshTabs() {
+  const by_id = {};
+  Object.values(dlGroups).forEach(g => g.members.forEach(m => { by_id[m.id] = m; }));
+  document.querySelectorAll('[data-dl-state]').forEach(el => {
+    const m = by_id[el.dataset.dlState];
+    if (m) el.innerHTML = dlTabState(m);
+  });
+}
+
 function updateSummary() {
   const keys = Object.keys(fileState);
   const done = keys.filter(k => fileState[k].downloaded).length;
@@ -2531,11 +2609,75 @@ document.getElementById('cacheClearBtn').addEventListener('click', async () => {
 });
 loadCacheInfo();
 
+// One resource's body: its own description, source and download controls.
+function dlBody(r) {
+  const info = `
+    <div class="info">
+      <p>${r.description}</p>
+      <div class="source">Source: <a href="${r.source_url}" target="_blank" rel="noopener">${r.source_url}</a></div>
+    </div>
+  `;
+  if (r.files.length === 1) {
+    return `<div class="dl-body">${info}
+      <div class="download-meta" data-key-holder="${r.files[0].key}">${controlHtml(r.files[0].key)}</div></div>`;
+  }
+  const tiles = r.files.map(f => `<div class="tile-btn" data-key-holder="${f.key}">${controlHtml(f.key)}</div>`).join('');
+  return `<div class="dl-body column">
+      <div class="top-row">${info}
+        <div class="download-meta"><span class="download-size">Total: ${formatBytes(r.total_size_bytes)}</span></div>
+      </div>
+      <div class="tile-grid">${tiles}</div>
+    </div>`;
+}
+
+// "3 / 96" for a resource whose files are downloaded one by one, a tick when
+// it is complete: on a group's sub-tab, so which alternative is already on
+// disk can be read off the tabs (user).
+function dlTabState(r) {
+  const keys = r.files.map(f => f.key);
+  const done = keys.filter(k => fileState[k] && fileState[k].downloaded).length;
+  if (done === keys.length) return '<span class="dl-done">&#10003;</span>';
+  return keys.length > 1 ? `<span class="dl-tab-count">${done} / ${keys.length}</span>` : '';
+}
+
+function dlGroupCard(g) {
+  const card = document.createElement('div');
+  card.className = 'download-card group';
+  const pick = dlGroupPick(g);
+  const tabs = g.members.map(r => `
+    <button class="dl-tab${r.id === pick ? ' active' : ''}" data-dl-group="${g.id}" data-dl-member="${r.id}">
+      <span class="dl-tab-name">${r.tab_label || r.title}</span>
+      <span class="dl-tab-note">${r.tab_note || ''}</span>
+      <span class="dl-tab-state" data-dl-state="${r.id}">${dlTabState(r)}</span>
+    </button>`).join('');
+  const r = g.members.find(m => m.id === pick) || g.members[0];
+  card.innerHTML = `
+    <div class="dl-group-head">
+      <h3>${g.info.title}</h3>
+      <p>${g.info.description}</p>
+    </div>
+    <div class="dl-tabs">${tabs}</div>
+    ${dlBody(r)}
+  `;
+  return card;
+}
+
+// Which alternative of a group the card shows; kept in localStorage.
+function dlGroupPick(g) {
+  const saved = dlSaved().groups || {};
+  const pick = saved[g.id];
+  return g.members.some(m => m.id === pick) ? pick : (g.info.default || g.members[0].id);
+}
+
 async function loadDownloads() {
   const listEl = document.getElementById('downloadList');
   try {
     const resources = await fetch('/api/downloads').then(r => r.json());
     listEl.innerHTML = '';
+    // alternatives (the two elevation sources) share one card with a sub-tab
+    // each, so only one of them is plainly needed (user)
+    const groups = {};
+    const rows = [];
     resources.forEach(r => {
       r.files.forEach(f => {
         fileState[f.key] = {
@@ -2543,38 +2685,26 @@ async function loadDownloads() {
           downloaded: f.downloaded, state: f.state,
         };
       });
-
-      const card = document.createElement('div');
-      const infoHtml = `
-        <div class="info">
-          <h3>${r.title}</h3>
-          <p>${r.description}</p>
-          <div class="source">Source: <a href="${r.source_url}" target="_blank" rel="noopener">${r.source_url}</a></div>
-        </div>
-      `;
-
-      if (r.files.length === 1) {
-        card.className = 'download-card';
-        card.innerHTML = `
-          ${infoHtml}
-          <div class="download-meta" data-key-holder="${r.files[0].key}">${controlHtml(r.files[0].key)}</div>
-        `;
+      if (r.group && r.group_info) {
+        if (!groups[r.group]) {
+          groups[r.group] = { id: r.group, info: r.group_info, members: [] };
+          rows.push(groups[r.group]);
+        }
+        groups[r.group].members.push(r);
       } else {
-        card.className = 'download-card tiled';
-        const tiles = r.files.map(f => `
-          <div class="tile-btn" data-key-holder="${f.key}">${controlHtml(f.key)}</div>
-        `).join('');
-        card.innerHTML = `
-          <div class="top-row">
-            ${infoHtml}
-            <div class="download-meta">
-              <span class="download-size">Total: ${formatBytes(r.total_size_bytes)}</span>
-            </div>
-          </div>
-          <div class="tile-grid">${tiles}</div>
-        `;
+        rows.push({ single: r });
       }
-      listEl.appendChild(card);
+    });
+    dlGroups = groups;
+    rows.forEach(row => {
+      if (row.single) {
+        const card = document.createElement('div');
+        card.className = 'download-card';
+        card.innerHTML = `<h3>${row.single.title}</h3>${dlBody(row.single)}`;
+        listEl.appendChild(card);
+      } else {
+        listEl.appendChild(dlGroupCard(row));
+      }
     });
     updateSummary();
     if (Object.values(fileState).some(f => f.state && ['downloading', 'pending', 'extracting', 'retrying'].includes(f.state.status))) {
@@ -2588,6 +2718,15 @@ async function loadDownloads() {
 listElClickDelegate();
 function listElClickDelegate() {
   document.getElementById('downloadList').addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-dl-member]');
+    if (tab) {
+      const saved = dlSaved();
+      saved.groups = { ...(saved.groups || {}), [tab.dataset.dlGroup]: tab.dataset.dlMember };
+      dlSave(saved);
+      const g = dlGroups[tab.dataset.dlGroup];
+      if (g) tab.closest('.download-card').replaceWith(dlGroupCard(g));
+      return;
+    }
     const btn = e.target.closest('[data-action="start"]');
     if (!btn) return;
     const key = btn.dataset.key;
@@ -2657,6 +2796,7 @@ async function pollStatus() {
     if (!fileState[key].downloaded && ['downloading', 'pending', 'extracting', 'retrying'].includes(shown)) anyActive = true;
   }
   updateSummary();
+  dlRefreshTabs();
   if (!anyActive) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -3069,7 +3209,7 @@ function pvOtherTabParams() {
               levels: Object.entries(stLevels).map(([k, v]) => `${k}:${v}`).join(','), ...stDensityParams() };
   if (stRiversBox.checked) Object.assign(p, rvRiverParams());
   if (typeof trSettings === 'function' && trDefaults) Object.assign(p, trSettings());
-  p.relief = hmRelief.value;
+  Object.assign(p, hmReliefParams());
   if (ctInfo) Object.assign(p, ctSettings(), { counts: Object.entries(ctCounts).map(([k, v]) => `${k}:${v}`).join(',') });
   return p;
 }

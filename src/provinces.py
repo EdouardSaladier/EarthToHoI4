@@ -96,6 +96,7 @@ LAKE_SPLIT_MIN_PX = 100           # a lake bordered by several countries is divi
 LAKE_PART_MIN_PX = 40             # ... as long as every part keeps at least this much
 RIVER_PIECE_MIN_PX = 40           # a river split keeps pieces of at least this (and RIVER_PIECE_MIN_SHARE)
 RIVER_PIECE_MIN_SHARE = 0.15
+RIVER_SOURCE_DIR_PX = 6           # a source extension's direction: the river's own, over its last pixels
 MIN_PROVINCE_PX = 20
 GAME_MIN_PX = 12                  # HOI4: "Province N has only 8 pixels around ... Should have at least 8" (8 px fail) -- never kept below
 THIN_PX, THIN_MAX_BOX_PX = 8, 128  # water strips at most this wide: cut into pieces at most this long
@@ -398,7 +399,8 @@ def split_cost(land, rivers=None, terrain_img=None, finer_units=None, seed=SEED)
             lut[i] = names.index(t_) + 1
         cost += SPLIT_TERRAIN_W * edges(lut[np.asarray(terrain_img)])
     if rivers is not None:
-        cost += SPLIT_RIVER_W * (np.asarray(rivers) <= 11)
+        rv = np.asarray(rivers)
+        cost += SPLIT_RIVER_W * (rv if rv.dtype == bool else (rv <= 11))
     return cost.astype(np.float32)
 
 
@@ -1790,6 +1792,74 @@ def _province_factor(P, dens, ref, cap, dense_cap=1.0, country_mult=None):
     return f
 
 
+def _river_back(river, y, x, steps):
+    """`steps` pixels back along the river from one of its ends (the river is
+    1 px wide and 4-connected, so the walk is unambiguous): the pixel the
+    direction of flow is read from."""
+    h, w = river.shape
+    seen = {(y, x)}
+    cur = (y, x)
+    for _ in range(steps):
+        nxt = next((p for p in ((cur[0] - 1, cur[1]), (cur[0] + 1, cur[1]),
+                                (cur[0], cur[1] - 1), (cur[0], cur[1] + 1))
+                    if p not in seen and 0 <= p[0] < h and 0 <= p[1] < w and river[p]), None)
+        if nxt is None:
+            break
+        seen.add(nxt)
+        cur = nxt
+    return cur
+
+
+def _source_extensions(P, river):
+    """A river's **source** is a dead end: the river stops inside a province,
+    so the province is not cut in two and stays one (user, 2026-10-15:
+    "extend the river at its source to properly cut the province where the
+    source of a river is located").
+
+    Every dead end that lies *inside* a province -- all 8 of its neighbours
+    in the same one, so not an end sitting on the border, where the river
+    simply carries on into the next province -- is continued in a straight
+    line, in the direction the river was running (`_river_back`), until it
+    leaves that province or meets another river. River + extension then runs
+    from border to border and `_river_splits` can cut the province along it.
+
+    **For cutting only**: these pixels are plain land, never river pixels in
+    rivers.bmp, and they are not in `split_cost` either -- they are not a
+    river on the ground, only the line the one that is there would take.
+    Returns the added mask."""
+    h, w = river.shape
+    p = np.pad(river, 1)
+    deg = (p[:-2, 1:-1].astype(np.uint8) + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) * river
+    ends = river & (deg <= 1)
+    out = np.zeros_like(river)
+    ey, ex = np.nonzero(ends)
+    if not len(ey):
+        return out
+    own = P[ey, ex]
+    inside = own > 0
+    for dy in (-1, 0, 1):                       # inside its province, border excluded
+        for dx in (-1, 0, 1):
+            yy, xx = ey + dy, ex + dx
+            ok = (yy >= 0) & (yy < h) & (xx >= 0) & (xx < w)
+            inside &= ok & (P[np.clip(yy, 0, h - 1), np.clip(xx, 0, w - 1)] == own)
+    for i in np.flatnonzero(inside):
+        y, x, k = int(ey[i]), int(ex[i]), int(own[i])
+        by, bx = _river_back(river, y, x, RIVER_SOURCE_DIR_PX)
+        dy, dx = y - by, x - bx
+        if not dy and not dx:                   # a lone river pixel: no direction to follow
+            continue
+        n = max(abs(dy), abs(dx))
+        sy, sx = dy / n, dx / n
+        cy, cx = y + 0.5, x + 0.5
+        for _ in range(h + w):                  # it always leaves the province; a plain safety net
+            cy, cx = cy + sy, cx + sx
+            iy, ix = int(cy), int(cx)
+            if not (0 <= iy < h and 0 <= ix < w) or P[iy, ix] != k or river[iy, ix]:
+                break
+            out[iy, ix] = True
+    return out
+
+
 def _river_splits(P, ptype, group, river, min_px, given=None, country_of=None):
     """Land provinces of >= min_px that rivers cut into pieces are split
     along them (user: gameplay): every piece >= RIVER_PIECE_MIN_PX and
@@ -1799,8 +1869,15 @@ def _river_splits(P, ptype, group, river, min_px, given=None, country_of=None):
     same country (user: from the province or the state), never another
     country -- else to the nearest kept piece; each river pixel goes to the
     kept piece it borders most (all to the largest left 1 px strips where a
-    river ran on past the other piece). Returns splits done."""
+    river ran on past the other piece).
+
+    A river that ends inside a province -- its source -- is continued to that
+    province's border first (`_source_extensions`), so a source cuts its
+    province like any other stretch. Returns splits done."""
     given = given if given is not None else [0]
+    # a source inside a province cuts it too (_source_extensions); the
+    # provinces move between rounds, so the extensions are taken afresh
+    river = river | _source_extensions(P, river)
     n = int(P.max())
     size = np.bincount(P.ravel(), minlength=n + 1)
     on_river = np.bincount(P[river].ravel(), minlength=n + 1)
@@ -2401,10 +2478,17 @@ def _continents():
 
 
 def render_provinces(countries: Image.Image, debug, state_labels, states_report, rivers=None, terrain_img=None,
-                     settings=None, eez_zones=None, density_img=None, lake_ids=None, city_points=None):
+                     settings=None, eez_zones=None, density_img=None, lake_ids=None, city_points=None,
+                     river_cut_px=None):
     """(provinces image RGB = provinces.bmp, report, definition.csv text);
     report["_states_csv"] = province -> state table (popped by the app).
-    city_points: the City tab's cities [(x, y, class, name)] (city provinces)."""
+    city_points: the City tab's cities [(x, y, class, name)] (city provinces).
+    river_cut_px: the Rivers tab's `network_cut_px` -- the pixels the branch
+      cap deleted to keep each river network small enough for the game to
+      load (core._split_big_networks). They are river on the ground, so they
+      are put back into the mask every river rule here reads (user): a
+      province is still split along a river where one of those 1 px gaps
+      falls, and a province border still follows it."""
     s = normalize_settings(settings)
     t0 = time.time()
     rng = np.random.default_rng(SEED)
@@ -2428,6 +2512,15 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
             sea &= ~pocket
     land = ~sea & ~lakes
     timings = {}
+    # The rivers as a mask, the branch cap's gaps healed (river_cut_px): the
+    # game wants the gap in rivers.bmp, the map does not want a province to
+    # stop being cut because of it.
+    river_all = None
+    if rivers is not None:
+        river_all = np.asarray(rivers) <= 11
+        for cy_, cx_ in river_cut_px or ():
+            if 0 <= cy_ < h and 0 <= cx_ < w:
+                river_all[cy_, cx_] = True
 
     # Target province count (option): the land sizes are scaled until the
     # land provinces the sizing makes (+ the sea and lakes, whose settings
@@ -2541,7 +2634,7 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
         # 2. Rivers: borders within the band follow them, inside each state.
         river_moved = 0
         if rivers is not None:
-            river = (np.asarray(rivers) <= 11) & land & (stl > 0)
+            river = river_all & land & (stl > 0)
             if river.any():
                 band = (ndimage.distance_transform_edt(~river) <= states.RIVER_SNAP_PX) & ~river & land & (stl > 0)
                 outside = np.bincount(P[land & ~band & ~river].ravel(), minlength=int(P.max()) + 1)
@@ -2621,7 +2714,7 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
                 if rp:
                     n_f += 1
                     core._scanline_fill(finer, rp, n_f)
-        split_cost_img = split_cost(land, rivers, terrain_img, finer if n_f else None)
+        split_cost_img = split_cost(land, river_all, terrain_img, finer if n_f else None)
         f_split = f
         if city_mask is not None:  # a city isn't cut smaller for being dense: plain max (Paris came in 7 pieces)
             f_split = f.copy()
@@ -2635,7 +2728,7 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
         river_splits = 0
         river_bits = [0]
         if rivers is not None and rsplit > 0:
-            river_land = (np.asarray(rivers) <= 11) & land
+            river_land = river_all & land
             for _ in range(3):
                 sp = _river_splits(P, ptype, group, river_land, rsplit, river_bits, country_of)
                 river_splits += sp
@@ -2785,13 +2878,13 @@ def render_provinces(countries: Image.Image, debug, state_labels, states_report,
         if total_now > want_count:
             trimmed = _trim_to_count(P, ptype, group, total_now - want_count,
                                      _protected(P, city_mask) if city_mask is not None else frozenset(),
-                                     (np.asarray(rivers) <= 11) if rivers is not None else None)
+                                     river_all)
     # the game's border limit (hardcoded): merge the smallest land pairs
     # until under it, else province borders stop being drawn on the map
     border_merges, borders_before, _b = _cap_borders(
         P, ptype, group,
         _protected(P, city_mask) if city_mask is not None else frozenset(),
-        (np.asarray(rivers) <= 11) if rivers is not None else None)
+        river_all)
     timings["trim"] = round(time.time() - t0, 2)
     pstate += [0] * (len(ptype) - len(pstate))
     topo["split_tall"] = _split_tall(P, ptype, group, pstate)
